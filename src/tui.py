@@ -100,7 +100,7 @@ LOG_FILE = LOG_DIR / "tui.log"
 # se la rete e' raggiungibile, altrimenti fallback a Piper.
 EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
 EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "it-IT-DiegoNeural")
-EDGE_TTS_RATE = os.environ.get("EDGE_TTS_RATE", "+50%")
+EDGE_TTS_RATE = os.environ.get("EDGE_TTS_RATE", "+25%")
 
 # Modelli locali da ciclare con F1 (ordine = priorità)
 LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]

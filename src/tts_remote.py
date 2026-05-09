@@ -33,7 +33,7 @@ except Exception:  # noqa: BLE001
 class EdgeTTSClient:
     """Sintesi via edge-tts (servizio cloud Microsoft)."""
 
-    def __init__(self, voice: str = "it-IT-DiegoNeural", rate: str = "+50%",
+    def __init__(self, voice: str = "it-IT-DiegoNeural", rate: str = "+25%",
                  pitch: str = "+0Hz"):
         self.voice = voice
         # rate: "+50%" velocizza del 50%, "-10%" rallenta. Va passato come
