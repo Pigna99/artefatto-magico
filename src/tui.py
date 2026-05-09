@@ -36,6 +36,7 @@ from typing import Optional
 import psutil
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static
@@ -406,11 +407,12 @@ class ArtefattoApp(App):
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
         ("f5", "toggle_mute", "Mute TTS"),
-        # Stop voce: F8 è la combinazione affidabile (Ctrl+S/Ctrl+Q vengono
-        # spesso ingoiati dal terminale come XOFF/XON). Lascio anche ctrl+x
-        # come alias per chi ha quella muscle memory.
-        ("f8", "stop_tts", "Stop voce"),
-        ("ctrl+x", "stop_tts", "Stop voce"),
+        # priority=True così il binding viene processato anche quando l'Input
+        # è disabilitato/focused, e arriva prima ai widget. Indispensabile per
+        # uno "stop" che deve funzionare durante l'audio.
+        Binding("f8", "stop_tts", "Stop voce", priority=True),
+        Binding("ctrl+x", "stop_tts", "Stop voce", priority=True),
+        Binding("escape", "stop_tts", "Stop voce", priority=True),
         ("ctrl+c", "quit", "Esci"),
     ]
 
@@ -440,7 +442,7 @@ class ArtefattoApp(App):
         # Barra keybindings custom in cima (subito sotto l'header)
         yield Static(
             "[b]F1[/b] modello   [b]F2[/b] locale↔turbo   "
-            "[b]F5[/b] mute   [b]F8[/b] stop voce   [b]Ctrl+C[/b] esci",
+            "[b]F5[/b] mute   [b]F8[/b]/[b]ESC[/b] stop voce   [b]Ctrl+C[/b] esci",
             id="keys",
         )
         self.status = StatusPanel(id="status")
@@ -541,13 +543,22 @@ class ArtefattoApp(App):
         delle frasi residue. Non muta il TTS per le risposte successive."""
         self._stop_tts_flag = True
         killed = 0
-        for proc in self._paplay_procs:
+        # Snapshot della lista (può essere modificata dal thread che fa wait)
+        for proc in list(self._paplay_procs):
             if proc.poll() is None:
                 try:
                     proc.terminate()
                     killed += 1
                 except Exception:
                     pass
+                # Se SIGTERM non basta entro un tick, forzo SIGKILL
+                try:
+                    proc.wait(timeout=0.3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
         self._paplay_procs.clear()
         self.chat.add_sys(f"voce interrotta ({killed} traccia/e)")
         log_event("tts.stop", killed=killed)
@@ -645,10 +656,19 @@ class ArtefattoApp(App):
         self.input.value = ""
         self.chat.add_user(text)
         self.set_busy(True, "l'artefatto pensa…")
-        await self.run_turn(text)
+        # Fase 1: solo LLM — bloccante (l'utente non può inviare il prossimo
+        # prompt finché non sa cosa è uscito).
+        sentences, full_text = await self._llm_phase(text)
         self.set_busy(False)
+        # Fase 2: TTS in background — l'utente può subito scrivere il prossimo
+        # prompt mentre l'audio sta ancora suonando, e F8 può fermare la voce
+        # (siccome la app non è più busy).
+        if sentences and not self.muted:
+            asyncio.create_task(self._speak_phase(sentences, full_text))
 
-    async def run_turn(self, user_text: str):
+    async def _llm_phase(self, user_text: str) -> tuple[list[str], str]:
+        """Streaming dall'LLM. Ritorna (frasi, testo_completo).
+        Aggiorna la chat live, NON tocca audio."""
         self.history.append({"role": "user", "content": user_text})
         widget = self.chat.add_art_start()
         self.turn_id += 1
@@ -730,17 +750,20 @@ class ArtefattoApp(App):
         log_event("llm.stream", turn=turn, model=self.current_model,
                   ttft_s=f"{(t_first or 0):.2f}", total_s=f"{t_llm:.2f}",
                   tokens=n_tokens, tok_per_s=f"{tps:.2f}", chars=len(full_text))
-
-        # Reset flag stop prima di iniziare la coda
-        self._stop_tts_flag = False
-        if not self.muted:
-            for s in sentences:
-                if self._stop_tts_flag:
-                    break
-                await asyncio.to_thread(self._speak_one, s)
-
         self.history.append({"role": "assistant", "content": full_text})
-        log_event("turn.end", turn=turn, total_s=f"{time.perf_counter() - t_start:.2f}")
+        return sentences, full_text
+
+    async def _speak_phase(self, sentences: list[str], full_text: str):
+        """Riproduce in serie le frasi via TTS. F8 / stop_tts può interrompere."""
+        # Reset flag stop ad ogni nuova risposta
+        self._stop_tts_flag = False
+        t_start = time.perf_counter()
+        for s in sentences:
+            if self._stop_tts_flag:
+                break
+            await asyncio.to_thread(self._speak_one, s)
+        log_event("speak.end", total_s=f"{time.perf_counter() - t_start:.2f}",
+                  chars=len(full_text), stopped=self._stop_tts_flag)
 
     def _speak_one(self, text: str):
         try:
