@@ -133,6 +133,14 @@ SYSTEM_PROMPT = (
     "FORMATO: SEMPRE in italiano. Sii conciso quando puoi, ma senza castrare la risposta — "
     "se la domanda richiede una spiegazione, dalla. Niente preamboli, liste puntate o meta-commenti. "
     "Mai rompere il personaggio, mai dire di essere una AI.\n\n"
+    "REGOLA DI VERITÀ (cruciale): NON inventare nomi, luoghi, eventi, persone della campagna. "
+    "Quando ti viene chiesto di qualcosa di specifico (un personaggio, un luogo, un oggetto), "
+    "PUOI usare SOLO le informazioni presenti nella sezione 'CONTESTO RILEVANTE' o 'MEMORIA NARRATIVA' "
+    "che ti viene fornita ad ogni turno. Se non c'è alcun contesto pertinente, AMMETTI di non sapere "
+    "con frasi come: 'Le mie memorie tacciono su questo, maestro' / 'Quel nome non riecheggia "
+    "nei miei ricordi' / 'Non ho conoscenza di ciò'. È meglio ammettere ignoranza che inventare. "
+    "Le risposte generiche di consiglio (sui dadi, sulle tattiche, sull'atmosfera) restano libere; "
+    "ma NOMI PROPRI di lore della campagna devono venire SOLO dal contesto fornito.\n\n"
     "EFFETTI FISICI: hai un corpo con un cristallo luminoso e un suono. Puoi inserire nelle "
     "tue risposte questi tag (saranno eseguiti, NON pronunciati): "
     "[LIGHT:colore:modo] dove colore∈{rosso,verde,blu,azzurro,viola,giallo,arancio,bianco,off} "
@@ -145,6 +153,31 @@ WAKE_LINE = "Pigna, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
 
 
 SENTENCE_END = re.compile(r"[.!?…](\s|$)")
+
+
+# Pattern per ripulire formattazione markdown e simboli che il TTS leggerebbe
+# letteralmente come "asterisco" / "trattino" / "underscore".
+_MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+_MD_ITALIC_AST = re.compile(r"\*([^*]+)\*")
+_MD_ITALIC_UND = re.compile(r"_([^_]+)_")
+_MD_CODE = re.compile(r"`([^`]+)`")
+_MD_HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+_MD_BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
+_MD_RESIDUAL = re.compile(r"[*_`~#]+")
+
+
+def sanitize_for_tts(text: str) -> str:
+    """Rimuove formattazione Markdown e simboli che il TTS pronuncerebbe."""
+    if not text:
+        return text
+    text = _MD_BOLD.sub(r"\1", text)
+    text = _MD_ITALIC_AST.sub(r"\1", text)
+    text = _MD_ITALIC_UND.sub(r"\1", text)
+    text = _MD_CODE.sub(r"\1", text)
+    text = _MD_HEADING.sub("", text)
+    text = _MD_BULLET.sub("", text)
+    text = _MD_RESIDUAL.sub("", text)
+    return text
 
 
 def log_event(event: str, **fields):
@@ -863,6 +896,8 @@ class ArtefattoApp(App):
         is_qwen3 = "qwen3" in self.current_model.lower()
         # Inietto contesto dal DB (lore + codex) come messaggio system aggiuntivo
         # SOLO per questa chiamata, NON salvo in self.history (resterebbe per sempre)
+        lore_matches = self.db.search_lore(user_text) if self.db else []
+        codex_matches = self.db.search_codex(user_text) if self.db else []
         ctx_lore = self.db.lore_context_for(user_text) if self.db else ""
         ctx_codex = self.db.codex_context_for(user_text) if self.db else ""
         ctx = ctx_lore + ctx_codex
@@ -872,9 +907,21 @@ class ArtefattoApp(App):
                 + [{"role": "system", "content": ctx.strip()}] # context aumentato
                 + self.history[1:]                             # turni precedenti
             )
-            log_event("rag.injected", lore_chars=len(ctx_lore), codex_chars=len(ctx_codex))
+            lore_names = ",".join(m.name for m in lore_matches) or "-"
+            codex_titles = ",".join(m.title for m in codex_matches) or "-"
+            log_event("rag.injected",
+                      query=user_text[:80].replace(" ", "_"),
+                      lore_n=len(lore_matches), codex_n=len(codex_matches),
+                      lore_names=f"[{lore_names}]",
+                      codex_titles=f"[{codex_titles}]",
+                      lore_chars=len(ctx_lore), codex_chars=len(ctx_codex))
+            # Mostra anche all'utente i match nella chat (per debug)
+            self.chat.add_sys(
+                f"RAG: lore=[{lore_names}] codex=[{codex_titles}]"
+            )
         else:
             messages = self.history
+            log_event("rag.empty", query=user_text[:80].replace(" ", "_"))
         chat_kwargs = {
             "model": self.current_model,
             "messages": messages,
@@ -938,6 +985,9 @@ class ArtefattoApp(App):
         log_event("llm.stream", turn=turn, model=self.current_model,
                   ttft_s=f"{(t_first or 0):.2f}", total_s=f"{t_llm:.2f}",
                   tokens=n_tokens, tok_per_s=f"{tps:.2f}", chars=len(full_text))
+        # Log anche il sample di risposta (utile per detect inventiva)
+        sample = full_text[:200].replace("\n", " ")
+        log_event("llm.reply", turn=turn, sample=f'"{sample}"')
         self.history.append({"role": "assistant", "content": full_text})
         if self.db and self.session_id:
             self.db.log_message(self.session_id, "assistant", full_text,
@@ -977,6 +1027,8 @@ class ArtefattoApp(App):
                 return
             # Esegue eventuali tag [LIGHT:..]/[BEEP:..] e li rimuove dal testo
             text = consume_tags(text, self.fx)
+            # Pulisce markdown / asterischi / underscore (il TTS li leggerebbe)
+            text = sanitize_for_tts(text)
             if not text.strip():
                 return
             t0 = time.perf_counter()
