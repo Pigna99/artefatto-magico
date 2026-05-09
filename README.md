@@ -14,12 +14,13 @@ Il principio guida: *l'artefatto deve sembrare vivo*. Risposte brevi, atmosferic
 
 ## Stato attuale
 
-- ✅ REPL interattiva: scrivi una domanda, vedi la risposta in streaming, senti la voce robotica
+- ✅ TUI cockpit (Textual) con chat, sidebar di stato (CPU/RAM/temperatura colorate),
+  selettore modello (F1) e switch locale ↔ turbo (F2), mute TTS (F5)
+- ✅ REPL semplice come fallback (`ARTEFATTO_PLAIN=1 oracolo`)
 - ✅ Pipeline TTS persistente (Piper daemon, evita ricaricamento onnxruntime ogni frase)
-- ✅ Logging delle latenze in `logs/repl.log`
+- ✅ Logging delle latenze in `logs/tui.log` / `logs/repl.log`
 - 🔜 Bot Telegram per i comandi nascosti del Game Master
 - 🔜 GPIO per LED/buzzer reattivi
-- 🔜 Cockpit TUI per il GM (Textual)
 - 🔜 Microfono + STT per input vocale dei giocatori
 
 ## Setup sul Raspberry Pi
@@ -70,14 +71,24 @@ ARTEFATTO_MODEL=gemma3:270m oracolo
 ```
 artefatto-magico/
 ├── src/
-│   └── repl.py          # REPL principale (LLM streaming + Piper daemon + sox)
+│   ├── tui.py           # TUI cockpit (Textual): chat + status panel + keybindings
+│   └── repl.py          # REPL semplice (fallback)
 ├── bin/
-│   ├── artefatto        # launcher che attiva il venv e lancia repl.py
+│   ├── artefatto        # launcher: TUI di default, REPL se ARTEFATTO_PLAIN=1
 │   └── say              # script standalone: sintetizza una frase con preset CYLON
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
+
+## Keybindings TUI
+
+| Tasto | Azione |
+|---|---|
+| `F1` | Cicla modello locale (gemma3:270m → qwen3:0.6b → gemma3:1b) |
+| `F2` | Switch locale ↔ turbo (PC con GPU, se configurato) |
+| `F5` | Mute / unmute TTS |
+| `Ctrl+C` | Esci |
 
 ## Preset audio
 

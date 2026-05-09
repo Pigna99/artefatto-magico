@@ -1,2 +1,7 @@
 #!/bin/bash
-exec ~/artefatto/.venv/bin/python ~/artefatto/src/repl.py "$@"
+# Lancia la TUI cockpit per default. ARTEFATTO_PLAIN=1 per il REPL semplice.
+if [ "${ARTEFATTO_PLAIN:-0}" = "1" ]; then
+  exec ~/artefatto/.venv/bin/python ~/artefatto/src/repl.py "$@"
+else
+  exec ~/artefatto/.venv/bin/python ~/artefatto/src/tui.py "$@"
+fi
