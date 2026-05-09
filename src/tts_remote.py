@@ -33,11 +33,13 @@ except Exception:  # noqa: BLE001
 class EdgeTTSClient:
     """Sintesi via edge-tts (servizio cloud Microsoft)."""
 
-    def __init__(self, voice: str = "it-IT-DiegoNeural", rate: str = "+0%",
+    def __init__(self, voice: str = "it-IT-DiegoNeural", rate: str = "+50%",
                  pitch: str = "+0Hz"):
         self.voice = voice
-        self.rate = rate    # es. "-10%" rallenta del 10%
-        self.pitch = pitch  # es. "-2Hz" abbassa il tono
+        # rate: "+50%" velocizza del 50%, "-10%" rallenta. Va passato come
+        # stringa con segno; edge-tts lo accetta direttamente.
+        self.rate = rate
+        self.pitch = pitch
         self.tmpdir = Path(tempfile.mkdtemp(prefix="edge_tts_"))
 
     def is_ready(self, timeout: float = 3.0) -> bool:

@@ -776,19 +776,30 @@ class ArtefattoApp(App):
         return sentences, full_text
 
     async def _speak_phase(self, sentences: list[str], full_text: str):
-        """Riproduce in serie le frasi via TTS. F8 / stop_tts può interrompere."""
+        """Riproduce in serie le frasi via TTS. F8 / stop_tts può interrompere.
+
+        In turbo+edge-tts vale la pena fare UNA sola chiamata col testo intero:
+        meno round-trip di rete, meno overhead ffmpeg, audio fluido. In locale
+        teniamo la riproduzione frase-per-frase per dare prima feedback udibile."""
         self._stop_tts_flag = False
         if self.fx:
             self.fx.speaking()
         t_start = time.perf_counter()
-        for s in sentences:
-            if self._stop_tts_flag:
-                break
-            await asyncio.to_thread(self._speak_one, s)
+
+        if self.use_turbo and self.alltalk is not None and full_text.strip():
+            # Singola chiamata col testo unito
+            await asyncio.to_thread(self._speak_one, full_text)
+        else:
+            for s in sentences:
+                if self._stop_tts_flag:
+                    break
+                await asyncio.to_thread(self._speak_one, s)
+
         if self.fx:
             self.fx.idle()
         log_event("speak.end", total_s=f"{time.perf_counter() - t_start:.2f}",
-                  chars=len(full_text), stopped=self._stop_tts_flag)
+                  chars=len(full_text), stopped=self._stop_tts_flag,
+                  mode="turbo_single" if self.use_turbo and self.alltalk else "local_split")
 
     def _speak_one(self, text: str):
         try:
