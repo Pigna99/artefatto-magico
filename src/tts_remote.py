@@ -1,118 +1,133 @@
-"""Client TTS remoto (AllTalk TTS / XTTS-v2 sul PC con GPU).
+"""Client TTS remoto basato su edge-tts (Microsoft Edge Read Aloud).
 
-Espone la stessa interfaccia di PiperDaemon (`synth(text) -> Path`) così la
-TUI lo può sostituire al daemon Piper quando in modalità turbo.
+Espone la stessa interfaccia di PiperDaemon (`synth(text) -> Path`).
 
-Le voci disponibili sono recuperate via /api/voices. La voce di default per
-l'italiano è quella che il modello ha imparato; per voice cloning è
-sufficiente mettere un file `<nome>.wav` nella cartella `voices/` di AllTalk.
+edge-tts e' una libreria Python che parla via WebSocket coi server di
+Microsoft. Le voci italiane disponibili includono:
+  it-IT-DiegoNeural    (maschile, autorevole)  ← default
+  it-IT-ElsaNeural     (femminile chiara)
+  it-IT-IsabellaNeural (femminile matura)
+  it-IT-GianniNeural   (maschile giovane)
+
+Il flusso e':
+  testo -> edge-tts -> MP3 -> ffmpeg -> WAV PCM 22050 Hz mono
+Cosi' poi sox puo' applicare gli effetti CYLON come per Piper.
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
+import subprocess
 import tempfile
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
-import json
+try:
+    import edge_tts  # type: ignore
+except Exception:  # noqa: BLE001
+    edge_tts = None  # type: ignore
 
 
-class AllTalkClient:
-    """Client minimale per AllTalk TTS v2."""
+class EdgeTTSClient:
+    """Sintesi via edge-tts (servizio cloud Microsoft)."""
 
-    def __init__(self, base_url: str, voice: str, language: str = "it"):
-        self.base = base_url.rstrip("/")
+    def __init__(self, voice: str = "it-IT-DiegoNeural", rate: str = "+0%",
+                 pitch: str = "+0Hz"):
         self.voice = voice
-        self.language = language
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="alltalk_"))
-
-    # ------------------------------------------------------------------
-    # Health & voices
-    # ------------------------------------------------------------------
+        self.rate = rate    # es. "-10%" rallenta del 10%
+        self.pitch = pitch  # es. "-2Hz" abbassa il tono
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="edge_tts_"))
 
     def is_ready(self, timeout: float = 3.0) -> bool:
-        try:
-            req = urllib.request.Request(f"{self.base}/api/ready", method="GET")
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = r.read().decode("utf-8", errors="ignore").strip().lower()
-            return "ready" in body
-        except Exception:
+        if edge_tts is None:
             return False
-
-    def list_voices(self, timeout: float = 5.0) -> list[str]:
+        # Probe HTTP rapido al servizio Microsoft (no auth, no quota visibile).
+        # Se la rete e' giu' restituiamo False senza far esplodere la sessione.
         try:
-            with urllib.request.urlopen(f"{self.base}/api/voices", timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            voices = data.get("voices", [])
-            return [v.replace(".wav", "") if isinstance(v, str) else str(v) for v in voices]
+            import urllib.request
+            urllib.request.urlopen("https://speech.platform.bing.com/", timeout=timeout)
+            return True
         except Exception:
-            return []
+            try:
+                # alcuni endpoint di edge-tts non rispondono a GET nudo, fallback DNS
+                import socket
+                socket.gethostbyname("speech.platform.bing.com")
+                return True
+            except Exception:
+                return False
 
-    # ------------------------------------------------------------------
-    # Synthesis
-    # ------------------------------------------------------------------
+    def list_voices(self) -> list[str]:
+        # Solo voci italiane (le altre non ci interessano per questo progetto)
+        return [
+            "it-IT-DiegoNeural",
+            "it-IT-ElsaNeural",
+            "it-IT-IsabellaNeural",
+            "it-IT-GianniNeural",
+        ]
 
     def synth(self, text: str) -> Path:
-        """Manda testo al server, scarica il WAV finale, ritorna Path locale."""
+        """Manda il testo al servizio edge-tts, riceve MP3, lo converte in WAV."""
+        if edge_tts is None:
+            raise RuntimeError("edge-tts non installato")
         text = text.strip().replace("\r", " ").replace("\n", " ")
         if not text:
             raise ValueError("synth: testo vuoto")
 
-        voice = self.voice if self.voice.endswith(".wav") else f"{self.voice}.wav"
-        form = {
-            "text_input": text,
-            "text_filtering": "standard",
-            "character_voice_gen": voice,
-            "narrator_enabled": "false",
-            "narrator_voice_gen": voice,
-            "text_not_inside": "character",
-            "language": self.language,
-            "output_file_name": "artefatto",
-            "output_file_timestamp": "true",
-            "autoplay": "false",
-            "autoplay_volume": "0.8",
-            "streaming": "false",
-        }
-        data = urllib.parse.urlencode(form).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base}/api/tts-generate",
-            data=data,
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ts = int(time.time() * 1000)
+        mp3 = self.tmpdir / f"art_{ts}.mp3"
+        wav = self.tmpdir / f"art_{ts}.wav"
+
+        async def _gen():
+            communicate = edge_tts.Communicate(
+                text, self.voice, rate=self.rate, pitch=self.pitch
+            )
+            await communicate.save(str(mp3))
+
+        try:
+            asyncio.run(_gen())
+        except RuntimeError:
+            # Se gia' siamo in un loop (es. Textual), creiamo un loop nuovo in un thread
+            import threading
+            error: list[Exception] = []
+            def run():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(_gen())
+                    loop.close()
+                except Exception as e:
+                    error.append(e)
+            t = threading.Thread(target=run)
+            t.start()
+            t.join(timeout=60)
+            if error:
+                raise error[0]
+
+        if not mp3.exists() or mp3.stat().st_size < 100:
+            raise RuntimeError(f"edge-tts: MP3 vuoto ({mp3})")
+
+        # Convert MP3 -> WAV PCM con ffmpeg
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(mp3), "-ar", "22050", "-ac", "1", str(wav)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True,
         )
-        # Timeout largo: la prima generazione carica il modello (~30s),
-        # le successive tipicamente <3s.
-        with urllib.request.urlopen(req, timeout=120) as r:
-            payload = json.loads(r.read().decode("utf-8"))
-
-        # AllTalk risponde con: {"status":"generate-success",
-        #                        "output_file_path": "...", "output_file_url":"/audio/x.wav"}
-        url_path = payload.get("output_file_url") or ""
-        if not url_path:
-            raise RuntimeError(f"alltalk: payload inatteso: {payload}")
-
-        wav_url = self.base + url_path if url_path.startswith("/") else url_path
-        out_path = self.tmpdir / f"art_{int(time.time()*1000)}.wav"
-        with urllib.request.urlopen(wav_url, timeout=60) as r, out_path.open("wb") as f:
-            while True:
-                chunk = r.read(64 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-        if out_path.stat().st_size < 44:
-            raise RuntimeError(f"alltalk: WAV vuoto: {out_path}")
-        return out_path
+        mp3.unlink(missing_ok=True)
+        if wav.stat().st_size < 44:
+            raise RuntimeError(f"edge-tts: WAV vuoto ({wav})")
+        return wav
 
     def close(self):
         try:
-            for p in self.tmpdir.glob("*"):
-                p.unlink(missing_ok=True)
-            self.tmpdir.rmdir()
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
         except Exception:
             pass
+
+
+# Alias retro-compatibile col vecchio import nella TUI
+AllTalkClient = EdgeTTSClient
 
 
 # ---------------------------------------------------------------------------
@@ -120,22 +135,16 @@ class AllTalkClient:
 # ---------------------------------------------------------------------------
 
 def _selftest():
-    base = os.environ.get("ALLTALK_URL", "http://192.168.1.100:7851")
-    voice = os.environ.get("ALLTALK_VOICE", "female_01")
-    print(f"AllTalk base: {base}, voice: {voice}")
-    c = AllTalkClient(base, voice)
+    voice = os.environ.get("EDGE_TTS_VOICE", "it-IT-DiegoNeural")
+    print(f"voce: {voice}")
+    c = EdgeTTSClient(voice=voice)
     print("ready:", c.is_ready())
-    voices = c.list_voices()
-    print(f"voices ({len(voices)}):", ", ".join(voices[:10]),
-          "..." if len(voices) > 10 else "")
     if not c.is_ready():
-        print("server non raggiungibile, esco")
         return
-    print("synth in corso...")
     t0 = time.perf_counter()
-    wav = c.synth("In tempi remoti, prima ancora che la luna conoscesse il proprio nome, io già vegliavo.")
+    wav = c.synth("In tempi remoti, prima ancora che la luna conoscesse il proprio nome.")
     dt = time.perf_counter() - t0
-    print(f"WAV: {wav}  ({wav.stat().st_size} bytes, {dt:.2f}s)")
+    print(f"WAV: {wav} ({wav.stat().st_size} bytes, {dt:.2f}s)")
 
 
 if __name__ == "__main__":

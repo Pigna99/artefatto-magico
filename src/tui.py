@@ -95,10 +95,11 @@ LOG_DIR = HOME / "artefatto" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "tui.log"
 
-# AllTalk TTS (PC con GPU). Se vuoto, in turbo si usa Piper paola-medium.
-ALLTALK_URL = os.environ.get("ALLTALK_URL", "")
-ALLTALK_VOICE = os.environ.get("ALLTALK_VOICE", "female_01")
-ALLTALK_LANG = os.environ.get("ALLTALK_LANG", "it")
+# TTS remoto in modalità turbo. Default = edge-tts (cloud Microsoft, gratis,
+# voci italiane neurali). Si attiva automaticamente quando passi a turbo (F2)
+# se la rete e' raggiungibile, altrimenti fallback a Piper.
+EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
+EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "it-IT-DiegoNeural")
 
 # Modelli locali da ciclare con F1 (ordine = priorità)
 LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]
@@ -634,18 +635,18 @@ class ArtefattoApp(App):
                 self.turbo_models = self._discover_turbo_models()
             self.current_model = self.turbo_models[0] if self.turbo_models else TURBO_MODEL
             self.preset = PRESET_TURBO
-            # Tenta di abilitare il TTS remoto AllTalk se configurato
-            if ALLTALK_URL and AllTalkClient is not None:
+            # Tenta di abilitare edge-tts (cloud Microsoft, voci italiane neurali)
+            if EDGE_TTS_ENABLED and AllTalkClient is not None:
                 try:
                     if self.alltalk is None:
-                        self.alltalk = AllTalkClient(ALLTALK_URL, ALLTALK_VOICE, ALLTALK_LANG)
+                        self.alltalk = AllTalkClient(voice=EDGE_TTS_VOICE)
                     if self.alltalk.is_ready(timeout=2.0):
-                        self.chat.add_sys(f"TTS remoto attivo · voce {ALLTALK_VOICE}")
+                        self.chat.add_sys(f"TTS remoto attivo · {EDGE_TTS_VOICE}")
                     else:
-                        self.chat.add_sys(f"TTS remoto NON pronto su {ALLTALK_URL} · uso Piper")
+                        self.chat.add_sys("TTS remoto NON raggiungibile · uso Piper")
                         self.alltalk = None
                 except Exception as e:
-                    log_event("alltalk.init_error", err=repr(e))
+                    log_event("edge_tts.init_error", err=repr(e))
                     self.alltalk = None
             self.status.host_label = f"⚡ turbo ({TURBO_URL})"
         else:
