@@ -55,6 +55,9 @@ def log(event, **fields):
 class PiperDaemon:
     """Piper persistente: scrive un WAV nella tmpdir per ogni riga ricevuta su stdin."""
 
+    # Piper logga su stderr: "INFO:__main__:Wrote /path/file.wav"
+    _WROTE_RE = re.compile(r"Wrote\s+(\S+\.wav)")
+
     def __init__(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="piper_"))
         self.proc = subprocess.Popen(
@@ -68,39 +71,37 @@ class PiperDaemon:
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
         self.lock = threading.Lock()
 
     def synth(self, text):
-        # Piper scrive il path del WAV su stderr (logging "INFO:..."), non su
-        # stdout: leggere stdout si bloccherebbe. Polling sulla tmpdir invece.
+        """Manda testo e aspetta la riga 'Wrote <path>' su stderr,
+        garantendo che il file sia completamente scritto."""
         with self.lock:
-            before = set(self.tmpdir.iterdir())
             self.proc.stdin.write(text.replace("\n", " ").strip() + "\n")
             self.proc.stdin.flush()
-            # Timeout generoso: la prima sintesi può richiedere ~30s
-            # (caricamento modello onnx alla prima riga ricevuta).
-            for _ in range(2000):  # 2000 * 0.05 = 100s max
-                if self.proc.poll() is not None:
-                    raise RuntimeError(f"piper: processo terminato (rc={self.proc.returncode})")
-                new = set(self.tmpdir.iterdir()) - before
-                if new:
-                    wav = next(iter(new))
-                    # Aspetto che la scrittura sia completa: dimensione stabile
-                    # per due letture consecutive.
-                    last_size = -1
-                    for _ in range(40):
-                        size = wav.stat().st_size
-                        if size > 0 and size == last_size:
-                            return wav
-                        last_size = size
-                        time.sleep(0.05)
-                    return wav
-                time.sleep(0.05)
-            raise RuntimeError("piper: WAV non prodotto entro timeout")
+            # Leggo stderr finché trovo la riga "Wrote ...". Il processo Piper
+            # è line-buffered; alla prima frase ci mettono ~10-15s (caricamento
+            # modello onnx), poi <1s per le successive.
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                line = self.proc.stderr.readline()
+                if not line:
+                    if self.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"piper: processo terminato (rc={self.proc.returncode})"
+                        )
+                    continue
+                m = self._WROTE_RE.search(line)
+                if m:
+                    wav = Path(m.group(1))
+                    if wav.exists() and wav.stat().st_size > 44:
+                        return wav
+                    raise RuntimeError(f"piper: WAV mancante o vuoto: {wav}")
+            raise RuntimeError("piper: timeout su stderr Wrote")
 
     def close(self):
         try:
