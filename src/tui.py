@@ -42,6 +42,13 @@ from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static
 
 import ollama
 
+# Import condizionale: tts_remote vive accanto a tui.py, e potrebbe non
+# essere ancora copiato sul Pi. Se l'import fallisce, AllTalk è disabilitato.
+try:
+    from tts_remote import AllTalkClient
+except Exception:  # noqa: BLE001
+    AllTalkClient = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -79,6 +86,11 @@ PRESET_TURBO = {
 LOG_DIR = HOME / "artefatto" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "tui.log"
+
+# AllTalk TTS (PC con GPU). Se vuoto, in turbo si usa Piper paola-medium.
+ALLTALK_URL = os.environ.get("ALLTALK_URL", "")
+ALLTALK_VOICE = os.environ.get("ALLTALK_VOICE", "female_01")
+ALLTALK_LANG = os.environ.get("ALLTALK_LANG", "it")
 
 # Modelli locali da ciclare con F1 (ordine = priorità)
 LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]
@@ -411,14 +423,15 @@ class ArtefattoApp(App):
         super().__init__()
         self.client: Optional[ollama.Client] = None
         self.pool: Optional[PiperPool] = None
+        # Client TTS remoto (AllTalk/XTTS sul PC). Inizializzato lazy al primo
+        # switch turbo se ALLTALK_URL è configurato e raggiungibile.
+        self.alltalk = None  # type: Optional[AllTalkClient]
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.current_model = DEFAULT_MODEL
         self.use_turbo = False
         self.preset = PRESET_LOCAL
         self.turn_id = 0
-        # Lista di modelli turbo (riempita al primo switch turbo)
         self.turbo_models: list[str] = []
-        # Lista di subprocess paplay vivi: serve per Ctrl+S
         self._paplay_procs: list[subprocess.Popen] = []
         self._stop_tts_flag = False
 
@@ -462,6 +475,17 @@ class ArtefattoApp(App):
     @property
     def piper(self) -> PiperDaemon:
         return self.pool.get(self.preset)
+
+    def _synth_text(self, text: str) -> Path:
+        """Sintetizza una frase con il backend attivo (Piper o AllTalk).
+        Se AllTalk è configurato e siamo in turbo, lo usa; fallback a Piper."""
+        if self.use_turbo and self.alltalk is not None:
+            try:
+                return self.alltalk.synth(text)
+            except Exception as e:
+                log_event("alltalk.error", err=repr(e))
+                # cade nel piper come fallback senza interrompere la sessione
+        return self.piper.synth(text)
 
     # ------------------------------------------------------------------
     # Stats
@@ -580,6 +604,19 @@ class ArtefattoApp(App):
                 self.turbo_models = self._discover_turbo_models()
             self.current_model = self.turbo_models[0] if self.turbo_models else TURBO_MODEL
             self.preset = PRESET_TURBO
+            # Tenta di abilitare il TTS remoto AllTalk se configurato
+            if ALLTALK_URL and AllTalkClient is not None:
+                try:
+                    if self.alltalk is None:
+                        self.alltalk = AllTalkClient(ALLTALK_URL, ALLTALK_VOICE, ALLTALK_LANG)
+                    if self.alltalk.is_ready(timeout=2.0):
+                        self.chat.add_sys(f"TTS remoto attivo · voce {ALLTALK_VOICE}")
+                    else:
+                        self.chat.add_sys(f"TTS remoto NON pronto su {ALLTALK_URL} · uso Piper")
+                        self.alltalk = None
+                except Exception as e:
+                    log_event("alltalk.init_error", err=repr(e))
+                    self.alltalk = None
             self.status.host_label = f"⚡ turbo ({TURBO_URL})"
         else:
             self.client = ollama.Client()
@@ -710,7 +747,7 @@ class ArtefattoApp(App):
             if self._stop_tts_flag:
                 return
             t0 = time.perf_counter()
-            raw = self.piper.synth(text)
+            raw = self._synth_text(text)
             t_piper = time.perf_counter() - t0
             t0 = time.perf_counter()
             fx = apply_sox(raw, self.preset["effects"])
