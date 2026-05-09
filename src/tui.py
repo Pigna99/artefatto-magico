@@ -385,9 +385,7 @@ class ArtefattoApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    Header { dock: top; }
-    Footer { dock: top; }
-    #status { dock: top; }
+    #keys { height: 1; padding: 0 1; background: $accent 20%; color: $text; }
     #chat { height: 1fr; }
     Input { dock: bottom; }
     """
@@ -422,7 +420,12 @@ class ArtefattoApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Footer()
+        # Barra keybindings custom in cima (subito sotto l'header)
+        yield Static(
+            "[b]F1[/b] modello   [b]F2[/b] locale↔turbo   "
+            "[b]F5[/b] mute   [b]Ctrl+S[/b] stop voce   [b]Ctrl+C[/b] esci",
+            id="keys",
+        )
         self.status = StatusPanel(id="status")
         yield self.status
         self.chat = ChatLog(id="chat")
