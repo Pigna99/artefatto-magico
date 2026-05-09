@@ -51,6 +51,11 @@ except Exception:  # noqa: BLE001
     AllTalkClient = None  # type: ignore
 
 try:
+    from db import Database
+except Exception:  # noqa: BLE001
+    Database = None  # type: ignore
+
+try:
     from gpio_fx import GpioFx, consume_tags
 except Exception:  # noqa: BLE001
     GpioFx = None  # type: ignore
@@ -94,6 +99,9 @@ PRESET_TURBO = {
 LOG_DIR = HOME / "artefatto" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "tui.log"
+
+DATA_DIR = HOME / "artefatto" / "data"
+DB_PATH = DATA_DIR / "artefatto.db"
 
 # TTS remoto in modalità turbo. Default = edge-tts (cloud Microsoft, gratis,
 # voci italiane neurali). Si attiva automaticamente quando passi a turbo (F2)
@@ -447,6 +455,9 @@ class ArtefattoApp(App):
         # Effetti fisici (LED RGB + buzzer). Auto-fallback a mock se i pin
         # non sono cablati o gpiozero non è installato.
         self.fx = GpioFx() if GpioFx is not None else None
+        # Persistenza: sessione, messaggi, lore, codex
+        self.db = Database(DB_PATH) if Database is not None else None
+        self.session_id: Optional[int] = None
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.current_model = DEFAULT_MODEL
         self.use_turbo = False
@@ -460,8 +471,9 @@ class ArtefattoApp(App):
         yield Header(show_clock=True)
         # Barra keybindings custom in cima (subito sotto l'header)
         yield Static(
-            "[b]F1[/b] modello   [b]F2[/b] locale↔turbo   "
-            "[b]F5[/b] mute   [b]F8[/b]/[b]ESC[/b] stop voce   [b]Ctrl+C[/b] esci",
+            "[b]F1[/b] modello  [b]F2[/b] turbo  [b]F5[/b] mute  "
+            "[b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+C[/b] esci  "
+            "[b]/help[/b] comandi",
             id="keys",
         )
         self.status = StatusPanel(id="status")
@@ -481,10 +493,16 @@ class ArtefattoApp(App):
         self.set_busy(True, "risveglio in corso…")
         self.chat.add_sys("caricamento Piper…")
         await asyncio.to_thread(self._init_engines)
+        if self.db:
+            self.session_id = self.db.start_session(
+                model=self.current_model, turbo=self.use_turbo,
+            )
         self.chat.add_sys(f"pronto · modello {self.current_model}")
-        log_event("session.start", model=self.current_model)
+        log_event("session.start", model=self.current_model, session_id=self.session_id)
         await self.speak_and_show(WAKE_LINE)
         self.history.append({"role": "assistant", "content": WAKE_LINE})
+        if self.db and self.session_id:
+            self.db.log_message(self.session_id, "assistant", WAKE_LINE)
         self.set_busy(False)
 
     def _init_engines(self):
@@ -682,17 +700,142 @@ class ArtefattoApp(App):
             return
         self.input.push_history(text)
         self.input.value = ""
+
+        # Comandi slash: gestiti localmente, non vanno all'LLM
+        if text.startswith("/"):
+            self.chat.add_user(text)
+            handled = await self._handle_slash(text)
+            if handled:
+                return
+
         self.chat.add_user(text)
+        if self.db and self.session_id:
+            self.db.log_message(self.session_id, "user", text)
         self.set_busy(True, "l'artefatto pensa…")
-        # Fase 1: solo LLM — bloccante (l'utente non può inviare il prossimo
-        # prompt finché non sa cosa è uscito).
         sentences, full_text = await self._llm_phase(text)
         self.set_busy(False)
-        # Fase 2: TTS in background — l'utente può subito scrivere il prossimo
-        # prompt mentre l'audio sta ancora suonando, e F8 può fermare la voce
-        # (siccome la app non è più busy).
         if sentences and not self.muted:
             asyncio.create_task(self._speak_phase(sentences, full_text))
+
+    async def _handle_slash(self, text: str) -> bool:
+        """Gestisce comandi tipo /lore, /codex, /list. Ritorna True se è stato
+        riconosciuto e processato (non va all'LLM)."""
+        if self.db is None:
+            self.chat.add_sys("DB non disponibile, comandi /lore disabilitati")
+            return True
+
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
+
+        try:
+            if cmd in ("/lore", "/l"):
+                return self._cmd_lore(rest)
+            if cmd in ("/codex", "/c"):
+                return self._cmd_codex(rest)
+            if cmd == "/help":
+                self.chat.add_sys(
+                    "comandi: /lore add <kind> <name> <description> · /lore list · /lore rm <name> · "
+                    "/codex add <title> <body> · /codex append <title> <body> · /codex list · /codex rm <title>"
+                )
+                return True
+            self.chat.add_sys(f"comando ignoto: {cmd} (prova /help)")
+            return True
+        except Exception as e:
+            self.chat.add_sys(f"errore comando: {e}")
+            return True
+
+    def _cmd_lore(self, rest: str) -> bool:
+        """Sintassi:
+            /lore add <kind> <name> <description...>
+            /lore list [kind]
+            /lore rm <name> [kind]
+        kind ∈ {npc, pg, place, item, event, note}
+        """
+        if not rest:
+            self.chat.add_sys("uso: /lore add|list|rm ...")
+            return True
+        sub, _, args = rest.partition(" ")
+        sub = sub.lower()
+
+        if sub == "add":
+            tokens = args.split(maxsplit=2)
+            if len(tokens) < 3:
+                self.chat.add_sys("uso: /lore add <kind> <name> <description>")
+                return True
+            kind, name, desc = tokens
+            self.db.add_lore(name=name, kind=kind, description=desc)
+            self.chat.add_sys(f"lore salvato: {kind} {name}")
+        elif sub == "list":
+            entries = self.db.all_lore()
+            if args.strip():
+                entries = [e for e in entries if e.kind == args.strip()]
+            if not entries:
+                self.chat.add_sys("lore vuoto")
+            else:
+                for e in entries[:30]:
+                    self.chat.add_sys(e.to_context_line())
+                if len(entries) > 30:
+                    self.chat.add_sys(f"...e altri {len(entries)-30}")
+        elif sub == "rm":
+            tokens = args.split(maxsplit=1)
+            if not tokens:
+                self.chat.add_sys("uso: /lore rm <name> [kind]")
+                return True
+            name = tokens[0]
+            kind = tokens[1] if len(tokens) > 1 else None
+            n = self.db.remove_lore(name, kind)
+            self.chat.add_sys(f"rimosso {n} elementi")
+        else:
+            self.chat.add_sys(f"sotto-comando ignoto: /lore {sub}")
+        return True
+
+    def _cmd_codex(self, rest: str) -> bool:
+        """Sintassi:
+            /codex add <title> <body...>
+            /codex append <title> <body...>
+            /codex list
+            /codex rm <title>
+        """
+        if not rest:
+            self.chat.add_sys("uso: /codex add|append|list|rm ...")
+            return True
+        sub, _, args = rest.partition(" ")
+        sub = sub.lower()
+
+        if sub == "add":
+            tokens = args.split(maxsplit=1)
+            if len(tokens) < 2:
+                self.chat.add_sys("uso: /codex add <titolo> <testo>")
+                return True
+            title, body = tokens
+            self.db.add_codex(title=title, body=body)
+            self.chat.add_sys(f"codex salvato: {title}")
+        elif sub == "append":
+            tokens = args.split(maxsplit=1)
+            if len(tokens) < 2:
+                self.chat.add_sys("uso: /codex append <titolo> <testo>")
+                return True
+            title, body = tokens
+            self.db.append_codex(title, body)
+            self.chat.add_sys(f"codex esteso: {title}")
+        elif sub == "list":
+            entries = self.db.all_codex(limit=30)
+            if not entries:
+                self.chat.add_sys("codex vuoto")
+            else:
+                for e in entries:
+                    self.chat.add_sys(e.to_context_line())
+        elif sub == "rm":
+            title = args.strip()
+            if not title:
+                self.chat.add_sys("uso: /codex rm <titolo>")
+                return True
+            n = self.db.remove_codex(title)
+            self.chat.add_sys(f"rimosso {n} elementi")
+        else:
+            self.chat.add_sys(f"sotto-comando ignoto: /codex {sub}")
+        return True
 
     async def _llm_phase(self, user_text: str) -> tuple[list[str], str]:
         """Streaming dall'LLM. Ritorna (frasi, testo_completo).
@@ -717,9 +860,23 @@ class ArtefattoApp(App):
         # pensare. Su un modello da 0.6B questo può richiedere minuti senza mai
         # produrre testo visibile. Lo disabilito per i modelli che lo supportano.
         is_qwen3 = "qwen3" in self.current_model.lower()
+        # Inietto contesto dal DB (lore + codex) come messaggio system aggiuntivo
+        # SOLO per questa chiamata, NON salvo in self.history (resterebbe per sempre)
+        ctx_lore = self.db.lore_context_for(user_text) if self.db else ""
+        ctx_codex = self.db.codex_context_for(user_text) if self.db else ""
+        ctx = ctx_lore + ctx_codex
+        if ctx:
+            messages = (
+                [self.history[0]]                              # system base
+                + [{"role": "system", "content": ctx.strip()}] # context aumentato
+                + self.history[1:]                             # turni precedenti
+            )
+            log_event("rag.injected", lore_chars=len(ctx_lore), codex_chars=len(ctx_codex))
+        else:
+            messages = self.history
         chat_kwargs = {
             "model": self.current_model,
-            "messages": self.history,
+            "messages": messages,
             "stream": True,
         }
         if is_qwen3:
@@ -781,6 +938,10 @@ class ArtefattoApp(App):
                   ttft_s=f"{(t_first or 0):.2f}", total_s=f"{t_llm:.2f}",
                   tokens=n_tokens, tok_per_s=f"{tps:.2f}", chars=len(full_text))
         self.history.append({"role": "assistant", "content": full_text})
+        if self.db and self.session_id:
+            self.db.log_message(self.session_id, "assistant", full_text,
+                                model=self.current_model, tokens=n_tokens,
+                                duration_s=t_llm)
         return sentences, full_text
 
     async def _speak_phase(self, sentences: list[str], full_text: str):
@@ -850,11 +1011,15 @@ class ArtefattoApp(App):
             await asyncio.to_thread(self._speak_one, text)
 
     async def on_unmount(self):
-        log_event("session.end")
+        log_event("session.end", session_id=self.session_id)
         if self.fx:
             self.fx.close()
         if self.pool:
             self.pool.close_all()
+        if self.db:
+            if self.session_id:
+                self.db.end_session(self.session_id)
+            self.db.close()
 
 
 def main():
