@@ -110,8 +110,11 @@ EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
 EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "it-IT-DiegoNeural")
 EDGE_TTS_RATE = os.environ.get("EDGE_TTS_RATE", "+25%")
 
-# Modelli locali da ciclare con F1 (ordine = priorità)
-LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]
+# Modelli locali da ciclare con F1.
+# I modelli <1B (gemma3:270m, qwen3:0.6b) sono troppo piccoli per seguire le
+# regole anti-invenzione e tendono a non rispettare il contesto RAG. Li teniamo
+# solo come fallback estremo, accessibili via env override.
+LOCAL_MODELS = ["gemma3:1b", "qwen3:0.6b", "gemma3:270m"]
 DEFAULT_MODEL = os.environ.get("ARTEFATTO_MODEL", LOCAL_MODELS[0])
 
 # Endpoint del PC con GPU. Configurabile via env. Se vuoto, "turbo" è disabilitato.

@@ -20,8 +20,24 @@ ENTRIES = [
     # (kind, name, description, tags)
     ("place", "Pianeta Patate",
      "Mondo agricolo della Quarta Spirale, orbita la stella gialla Tuberalis. "
-     "Tre lune: Bollita, Arrosto, Lessa. In lingua antica si chiama Solanum Magnum.",
-     "pianeta,patate,quarta-spirale"),
+     "Ha tre lune (satelliti naturali): Bollita, Arrosto e Lessa, ognuna "
+     "corrispondente a una stagione. In lingua antica si chiama Solanum Magnum. "
+     "Superficie 78% Pianure di Tuberi.",
+     "pianeta,patate,quarta-spirale,lune,satelliti"),
+
+    ("place", "Bollita",
+     "Una delle tre lune (satelliti) del Pianeta Patate. Corrisponde alla "
+     "stagione di Bollita, periodo umido in cui i Tubrid germogliano nuovi "
+     "raccolti.",
+     "luna,satellite,stagione"),
+    ("place", "Arrosto",
+     "Luna del Pianeta Patate associata alla stagione calda di Arrosto, "
+     "durante la quale si celebra la Festa della Frittura.",
+     "luna,satellite,stagione,festa"),
+    ("place", "Lessa",
+     "Terza luna (satellite) del Pianeta Patate, regna nella stagione di "
+     "Lessa, periodo di riposo e contemplazione.",
+     "luna,satellite,stagione"),
     ("place", "Monte Buccia",
      "Unica vetta innevata del Pianeta Patate (4200 m). Sacra ai Tubrid. "
      "Sotto vi giace il Tempio del Solco.",
