@@ -385,6 +385,8 @@ class ArtefattoApp(App):
 
     CSS = """
     Screen { layout: vertical; }
+    Header { dock: top; }
+    Footer { dock: top; }
     #status { dock: top; }
     #chat { height: 1fr; }
     Input { dock: bottom; }
@@ -420,13 +422,13 @@ class ArtefattoApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        yield Footer()
         self.status = StatusPanel(id="status")
         yield self.status
         self.chat = ChatLog(id="chat")
         yield self.chat
         self.input = HistoryInput(placeholder="Scrivi qui... (Invio per inviare)", id="input")
         yield self.input
-        yield Footer()
 
     async def on_mount(self):
         self.status.model = self.current_model
