@@ -660,8 +660,14 @@ class ArtefattoApp(App):
         if self.pool:
             asyncio.get_running_loop().run_in_executor(None, lambda: self.pool.get(self.preset))
         self.status.model = self.current_model
+        # Etichetta voce: in turbo con edge-tts attivo, mostro la voce cloud
+        # invece di quella Piper del preset (che fa solo da fallback).
+        if self.use_turbo and self.alltalk is not None:
+            voice_label = EDGE_TTS_VOICE
+        else:
+            voice_label = self.preset["voice"].split("-")[1]
         self.chat.add_sys(
-            f"host → {self.status.host_label} · voce {self.preset['voice'].split('-')[1]}"
+            f"host → {self.status.host_label} · voce {voice_label}"
         )
         log_event("host.switch", turbo=self.use_turbo, model=self.current_model)
 
