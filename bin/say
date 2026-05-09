@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+VOICE='it_IT-riccardo-x_low'
+DATA_DIR="$HOME/piper/voices"
+PIPER="$HOME/piper/.venv/bin/python -m piper"
+TMP=$(mktemp --suffix=.wav)
+RAW="${TMP}.raw.wav"
+trap 'rm -f "$TMP" "$RAW"' EXIT
+if [ $# -gt 0 ]; then TEXT="$*"; else TEXT=$(cat); fi
+echo "$TEXT" | $PIPER -m "$VOICE" --data-dir "$DATA_DIR" --length-scale 1.3 -f "$RAW" 2>/dev/null
+sox "$RAW" "$TMP" highpass 500 lowpass 3500 echo 0.8 0.7 40 0.6 tremolo 20 80 overdrive 4 2>/dev/null
+paplay "$TMP"

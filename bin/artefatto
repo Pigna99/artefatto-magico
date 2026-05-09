@@ -1,0 +1,2 @@
+#!/bin/bash
+exec ~/artefatto/.venv/bin/python ~/artefatto/src/repl.py "$@"
