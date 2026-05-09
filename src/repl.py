@@ -67,7 +67,7 @@ class PiperDaemon:
                 "--output-dir-naming", "timestamp",
             ],
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
@@ -75,19 +75,32 @@ class PiperDaemon:
         self.lock = threading.Lock()
 
     def synth(self, text):
+        # Piper scrive il path del WAV su stderr (logging "INFO:..."), non su
+        # stdout: leggere stdout si bloccherebbe. Polling sulla tmpdir invece.
         with self.lock:
             before = set(self.tmpdir.iterdir())
             self.proc.stdin.write(text.replace("\n", " ").strip() + "\n")
             self.proc.stdin.flush()
-            out_line = self.proc.stdout.readline().strip()
-            if out_line and Path(out_line).exists():
-                return Path(out_line)
-            for _ in range(100):
+            # Timeout generoso: la prima sintesi può richiedere ~30s
+            # (caricamento modello onnx alla prima riga ricevuta).
+            for _ in range(2000):  # 2000 * 0.05 = 100s max
+                if self.proc.poll() is not None:
+                    raise RuntimeError(f"piper: processo terminato (rc={self.proc.returncode})")
                 new = set(self.tmpdir.iterdir()) - before
                 if new:
-                    return next(iter(new))
+                    wav = next(iter(new))
+                    # Aspetto che la scrittura sia completa: dimensione stabile
+                    # per due letture consecutive.
+                    last_size = -1
+                    for _ in range(40):
+                        size = wav.stat().st_size
+                        if size > 0 and size == last_size:
+                            return wav
+                        last_size = size
+                        time.sleep(0.05)
+                    return wav
                 time.sleep(0.05)
-            raise RuntimeError("piper: WAV non prodotto")
+            raise RuntimeError("piper: WAV non prodotto entro timeout")
 
     def close(self):
         try:
