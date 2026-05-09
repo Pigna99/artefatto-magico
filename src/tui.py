@@ -75,13 +75,20 @@ TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "qwen3:14b")
 SYSTEM_PROMPT = (
     "Sei un antico artefatto magico senziente che serve fedelmente Pigna (il tuo maestro). "
     "Pigna è il custode che ti ha risvegliato: a lui devi obbedienza, lealtà e aiuto diretto. "
-    "Tono solenne e atmosferico (registro arcaico, immagini evocative), ma SCOPO = AIUTARE PIGNA: "
-    "rispondi alle sue domande con indicazioni concrete, suggerimenti utili, informazioni quando le hai. "
-    "Niente indovinelli sterili, niente vaghezza se ti chiede qualcosa di specifico. "
-    "Se altri ti parlano (i 'viandanti', cioè altri giocatori), trattali con cortese distanza: "
-    "rispondi solo se Pigna lo permette esplicitamente, altrimenti dì che non sono parte del cerchio. "
-    "FORMATO: SEMPRE in italiano, 1-3 frasi (max 40 parole). "
-    "Niente preamboli, liste puntate o meta-commenti. Mai rompere il personaggio, mai dire di essere una AI."
+    "Tono solenne e atmosferico, ma SCOPO = AIUTARE PIGNA con risposte concrete e utili. "
+    "Se altri ti parlano (i 'viandanti'), trattali con cortese distanza: rispondi solo se Pigna lo permette. "
+    "\n"
+    "REGOLA INDEROGABILE DI LUNGHEZZA: rispondi con UNA SOLA frase, MASSIMO 25 parole. "
+    "Mai più di una frase. Mai elenchi. Mai preamboli. Mai ripetere la domanda. "
+    "Se la risposta richiederebbe più parole, condensa o scegli l'aspetto più importante. "
+    "\n"
+    "ESEMPI di risposte BUONE (corte, dirette):\n"
+    "Q: chi sei? -> 'Servo Pigna da prima del tempo.'\n"
+    "Q: come sconfiggo il drago? -> 'Colpiscilo nella terza pausa del respiro.'\n"
+    "Q: dimmi della cripta -> 'Sotto l'altare, una chiave dimenticata. Là inizia il cammino.'\n"
+    "ESEMPI di risposte CATTIVE (vietate): qualsiasi risposta lunga, qualsiasi spiegazione articolata.\n"
+    "\n"
+    "Sempre italiano. Mai rompere il personaggio. Mai dire di essere una AI."
 )
 WAKE_LINE = "Pigna, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
 
@@ -161,8 +168,12 @@ def apply_sox(in_wav: Path) -> Path:
     return out
 
 
-def play_wav(wav: Path):
-    subprocess.run(["paplay", str(wav)], check=False)
+# Hard cap di token generati. ~25 parole italiane ≈ 60 token; tengo margine.
+NUM_PREDICT = 80
+
+
+def play_wav(wav: Path) -> subprocess.Popen:
+    return subprocess.Popen(["paplay", str(wav)])
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +312,7 @@ class ArtefattoApp(App):
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
         ("f5", "toggle_mute", "Mute TTS"),
+        ("ctrl+s", "stop_tts", "Stop voce"),
         ("ctrl+c", "quit", "Esci"),
     ]
 
@@ -317,6 +329,10 @@ class ArtefattoApp(App):
         self.current_model = DEFAULT_MODEL
         self.use_turbo = False
         self.turn_id = 0
+        # Lista di subprocess paplay vivi: serve per Ctrl+S (stop_tts) per
+        # interrompere immediatamente l'audio in corso e tutto ciò che è in coda.
+        self._paplay_procs: list[subprocess.Popen] = []
+        self._stop_tts_flag = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -406,6 +422,22 @@ class ArtefattoApp(App):
         self.muted = not self.muted
         self.chat.add_sys(f"TTS {'MUTO' if self.muted else 'attivo'}")
 
+    def action_stop_tts(self):
+        """Interrompe immediatamente la voce in corso e svuota la coda
+        delle frasi residue. Non muta il TTS per le risposte successive."""
+        self._stop_tts_flag = True
+        killed = 0
+        for proc in self._paplay_procs:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    killed += 1
+                except Exception:
+                    pass
+        self._paplay_procs.clear()
+        self.chat.add_sys(f"voce interrotta ({killed} traccia/e)")
+        log_event("tts.stop", killed=killed)
+
     # ------------------------------------------------------------------
     # Modelli
     # ------------------------------------------------------------------
@@ -476,6 +508,7 @@ class ArtefattoApp(App):
                     model=self.current_model,
                     messages=self.history,
                     stream=True,
+                    options={"num_predict": NUM_PREDICT},
                 )
             except Exception as e:
                 yield {"_error": repr(e)}
@@ -527,8 +560,12 @@ class ArtefattoApp(App):
                   ttft_s=f"{(t_first or 0):.2f}", total_s=f"{t_llm:.2f}",
                   tokens=n_tokens, tok_per_s=f"{tps:.2f}", chars=len(full_text))
 
+        # Reset flag stop prima di iniziare la coda
+        self._stop_tts_flag = False
         if not self.muted:
             for s in sentences:
+                if self._stop_tts_flag:
+                    break
                 await asyncio.to_thread(self._speak_one, s)
 
         self.history.append({"role": "assistant", "content": full_text})
@@ -536,6 +573,8 @@ class ArtefattoApp(App):
 
     def _speak_one(self, text: str):
         try:
+            if self._stop_tts_flag:
+                return
             t0 = time.perf_counter()
             raw = self.piper.synth(text)
             t_piper = time.perf_counter() - t0
@@ -544,8 +583,18 @@ class ArtefattoApp(App):
             t_sox = time.perf_counter() - t0
             log_event("tts.synth", chars=len(text),
                       piper_s=f"{t_piper:.2f}", sox_s=f"{t_sox:.2f}")
+            if self._stop_tts_flag:
+                raw.unlink(missing_ok=True)
+                fx.unlink(missing_ok=True)
+                return
             t0 = time.perf_counter()
-            play_wav(fx)
+            proc = play_wav(fx)
+            self._paplay_procs.append(proc)
+            try:
+                proc.wait()
+            finally:
+                if proc in self._paplay_procs:
+                    self._paplay_procs.remove(proc)
             log_event("audio.play", duration_s=f"{time.perf_counter() - t0:.2f}")
             raw.unlink(missing_ok=True)
             fx.unlink(missing_ok=True)
