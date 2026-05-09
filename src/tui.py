@@ -50,6 +50,13 @@ try:
 except Exception:  # noqa: BLE001
     AllTalkClient = None  # type: ignore
 
+try:
+    from gpio_fx import GpioFx, consume_tags
+except Exception:  # noqa: BLE001
+    GpioFx = None  # type: ignore
+    def consume_tags(text, fx):  # fallback: lascia il testo invariato
+        return text
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -115,7 +122,14 @@ SYSTEM_PROMPT = (
     "rispondi solo se Pigna lo permette esplicitamente, altrimenti dì che non sono parte del cerchio. "
     "FORMATO: SEMPRE in italiano. Sii conciso quando puoi, ma senza castrare la risposta — "
     "se la domanda richiede una spiegazione, dalla. Niente preamboli, liste puntate o meta-commenti. "
-    "Mai rompere il personaggio, mai dire di essere una AI."
+    "Mai rompere il personaggio, mai dire di essere una AI.\n\n"
+    "EFFETTI FISICI: hai un corpo con un cristallo luminoso e un suono. Puoi inserire nelle "
+    "tue risposte questi tag (saranno eseguiti, NON pronunciati): "
+    "[LIGHT:colore:modo] dove colore∈{rosso,verde,blu,azzurro,viola,giallo,arancio,bianco,off} "
+    "e modo∈{on,pulse,off}; [BEEP:tipo] dove tipo∈{short,double,long,rise}. "
+    "Esempi naturali: '[LIGHT:azzurro:pulse] Ascolto, maestro.' "
+    "'[LIGHT:rosso:on][BEEP:rise] Pericolo si avvicina.' "
+    "Usa i tag con parsimonia, solo quando aggiungono atmosfera coerente con la risposta."
 )
 WAKE_LINE = "Pigna, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
 
@@ -428,6 +442,9 @@ class ArtefattoApp(App):
         # Client TTS remoto (AllTalk/XTTS sul PC). Inizializzato lazy al primo
         # switch turbo se ALLTALK_URL è configurato e raggiungibile.
         self.alltalk = None  # type: Optional[AllTalkClient]
+        # Effetti fisici (LED RGB + buzzer). Auto-fallback a mock se i pin
+        # non sono cablati o gpiozero non è installato.
+        self.fx = GpioFx() if GpioFx is not None else None
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.current_model = DEFAULT_MODEL
         self.use_turbo = False
@@ -542,6 +559,8 @@ class ArtefattoApp(App):
         """Interrompe immediatamente la voce in corso e svuota la coda
         delle frasi residue. Non muta il TTS per le risposte successive."""
         self._stop_tts_flag = True
+        if self.fx:
+            self.fx.idle()
         killed = 0
         # Snapshot della lista (può essere modificata dal thread che fa wait)
         for proc in list(self._paplay_procs):
@@ -669,6 +688,8 @@ class ArtefattoApp(App):
     async def _llm_phase(self, user_text: str) -> tuple[list[str], str]:
         """Streaming dall'LLM. Ritorna (frasi, testo_completo).
         Aggiorna la chat live, NON tocca audio."""
+        if self.fx:
+            self.fx.thinking()
         self.history.append({"role": "user", "content": user_text})
         widget = self.chat.add_art_start()
         self.turn_id += 1
@@ -755,19 +776,26 @@ class ArtefattoApp(App):
 
     async def _speak_phase(self, sentences: list[str], full_text: str):
         """Riproduce in serie le frasi via TTS. F8 / stop_tts può interrompere."""
-        # Reset flag stop ad ogni nuova risposta
         self._stop_tts_flag = False
+        if self.fx:
+            self.fx.speaking()
         t_start = time.perf_counter()
         for s in sentences:
             if self._stop_tts_flag:
                 break
             await asyncio.to_thread(self._speak_one, s)
+        if self.fx:
+            self.fx.idle()
         log_event("speak.end", total_s=f"{time.perf_counter() - t_start:.2f}",
                   chars=len(full_text), stopped=self._stop_tts_flag)
 
     def _speak_one(self, text: str):
         try:
             if self._stop_tts_flag:
+                return
+            # Esegue eventuali tag [LIGHT:..]/[BEEP:..] e li rimuove dal testo
+            text = consume_tags(text, self.fx)
+            if not text.strip():
                 return
             t0 = time.perf_counter()
             raw = self._synth_text(text)
@@ -803,6 +831,8 @@ class ArtefattoApp(App):
 
     async def on_unmount(self):
         log_event("session.end")
+        if self.fx:
+            self.fx.close()
         if self.pool:
             self.pool.close_all()
 
