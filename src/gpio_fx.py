@@ -48,6 +48,10 @@ PIN_G = int(os.environ.get("ARTEFATTO_PIN_G", "27"))
 PIN_B = int(os.environ.get("ARTEFATTO_PIN_B", "22"))
 PIN_BUZZ = int(os.environ.get("ARTEFATTO_PIN_BUZZ", "18"))
 LED_COMMON_ANODE = os.environ.get("ARTEFATTO_LED_ANODE", "1") == "1"
+# Tipo di buzzer: "passive" usa PWM tonale (TonalBuzzer), "active" usa on/off.
+# Il kit Elegoo include entrambi: il passive (cilindro aperto) e l'active (con
+# etichetta sopra). Il passive permette toni veri = effetti più espressivi.
+BUZZ_TYPE = os.environ.get("ARTEFATTO_BUZZ_TYPE", "passive")
 
 # Backend selection: "real" o "mock". Default "real" su Linux, "mock" altrove.
 DEFAULT_BACKEND = "real" if Path("/dev/gpiomem").exists() else "mock"
@@ -89,31 +93,61 @@ def parse_color(name: str) -> tuple[float, float, float]:
 # ---------------------------------------------------------------------------
 
 class _RealBackend:
+    """Hardware reale. LED e buzzer sono indipendenti: se uno non è cablato,
+    quel pezzo va in modalità no-op senza far cadere l'altro."""
+
     def __init__(self):
-        from gpiozero import RGBLED, Buzzer  # type: ignore
-        # gpiozero RGBLED gestisce anodo/catodo via active_high
-        self.led = RGBLED(red=PIN_R, green=PIN_G, blue=PIN_B,
-                          active_high=not LED_COMMON_ANODE)
-        self.buzz = Buzzer(PIN_BUZZ)
+        self.led = None
+        self.buzz_active = None
+        self.buzz_tonal = None
+        try:
+            from gpiozero import RGBLED  # type: ignore
+            self.led = RGBLED(red=PIN_R, green=PIN_G, blue=PIN_B,
+                              active_high=not LED_COMMON_ANODE)
+        except Exception as e:
+            print(f"[gpio] LED non inizializzato ({e}); LED disabilitato")
+        try:
+            if BUZZ_TYPE == "passive":
+                from gpiozero import TonalBuzzer  # type: ignore
+                self.buzz_tonal = TonalBuzzer(PIN_BUZZ)
+            else:
+                from gpiozero import Buzzer  # type: ignore
+                self.buzz_active = Buzzer(PIN_BUZZ)
+        except Exception as e:
+            print(f"[gpio] buzzer non inizializzato ({e}); audio disabilitato")
 
     def set_rgb(self, r: float, g: float, b: float):
-        self.led.value = (r, g, b)
+        if self.led is not None:
+            self.led.value = (r, g, b)
 
-    def buzz_on(self):
-        self.buzz.on()
+    def play_tone(self, freq_hz: float, duration_s: float):
+        """Suona una nota a freq_hz per duration_s. Se buzzer è active,
+        il parametro freq_hz è ignorato (l'active emette la sua frequenza fissa)."""
+        if self.buzz_tonal is not None:
+            try:
+                from gpiozero.tones import Tone  # type: ignore
+                self.buzz_tonal.play(Tone(int(freq_hz)))
+                time.sleep(duration_s)
+                self.buzz_tonal.stop()
+            except Exception:
+                pass
+        elif self.buzz_active is not None:
+            self.buzz_active.on()
+            time.sleep(duration_s)
+            self.buzz_active.off()
+        else:
+            time.sleep(duration_s)
 
-    def buzz_off(self):
-        self.buzz.off()
+    def silence(self, duration_s: float):
+        time.sleep(duration_s)
 
     def close(self):
-        try:
-            self.led.close()
-        except Exception:
-            pass
-        try:
-            self.buzz.close()
-        except Exception:
-            pass
+        for obj in (self.led, self.buzz_tonal, self.buzz_active):
+            try:
+                if obj is not None:
+                    obj.close()
+            except Exception:
+                pass
 
 
 class _MockBackend:
@@ -125,11 +159,12 @@ class _MockBackend:
             print(f"[gpio mock] LED rgb=({r:.2f},{g:.2f},{b:.2f})")
             self._last = (r, g, b)
 
-    def buzz_on(self):
-        print("[gpio mock] BUZZ on")
+    def play_tone(self, freq_hz: float, duration_s: float):
+        print(f"[gpio mock] BUZZ tone {int(freq_hz)}Hz for {duration_s:.2f}s")
+        time.sleep(duration_s)
 
-    def buzz_off(self):
-        print("[gpio mock] BUZZ off")
+    def silence(self, duration_s: float):
+        time.sleep(duration_s)
 
     def close(self):
         pass
@@ -159,11 +194,17 @@ class _State:
 class GpioFx:
     """Wrapper alto livello: stati semantici (idle/think/speak) + tag."""
 
+    # Ogni step è (freq_hz, durata_tono_s, pausa_dopo_s)
+    # Frequenze ispirate a interfacce sci-fi: 880=A5 alto, 440=A4 medio,
+    # 220=A3 grave, 1320=tono allarme.
     BEEP_PATTERNS = {
-        "short":  [(0.05, 0.0)],
-        "double": [(0.05, 0.08), (0.05, 0.0)],
-        "long":   [(0.4, 0.0)],
-        "rise":   [(0.04, 0.06), (0.06, 0.06), (0.10, 0.0)],
+        "short":  [(880, 0.08, 0.0)],
+        "double": [(880, 0.06, 0.08), (880, 0.06, 0.0)],
+        "long":   [(440, 0.45, 0.0)],
+        "rise":   [(440, 0.05, 0.04), (660, 0.05, 0.04), (880, 0.10, 0.0)],
+        "fall":   [(880, 0.05, 0.04), (660, 0.05, 0.04), (440, 0.10, 0.0)],
+        "alarm":  [(1320, 0.10, 0.08), (1320, 0.10, 0.08), (1320, 0.10, 0.0)],
+        "low":    [(220, 0.30, 0.0)],
     }
 
     def __init__(self):
@@ -207,12 +248,15 @@ class GpioFx:
         threading.Thread(target=self._play_pattern, args=(pattern,), daemon=True).start()
 
     def _play_pattern(self, pattern):
-        for on_s, off_s in pattern:
-            self._b.buzz_on()
-            time.sleep(on_s)
-            self._b.buzz_off()
+        for step in pattern:
+            # Compatibilità: 3-tupla (freq, on, off) o vecchia 2-tupla (on, off)
+            if len(step) == 3:
+                freq, on_s, off_s = step
+            else:
+                freq, on_s, off_s = 880.0, step[0], step[1]
+            self._b.play_tone(freq, on_s)
             if off_s:
-                time.sleep(off_s)
+                self._b.silence(off_s)
 
     # ---- thread di rendering --------------------------------------------
 
@@ -234,7 +278,6 @@ class GpioFx:
                 self._b.set_rgb(r * k, g * k, b * k)
             time.sleep(TICK)
         self._b.set_rgb(0, 0, 0)
-        self._b.buzz_off()
         self._b.close()
 
     def close(self):
@@ -283,12 +326,10 @@ def _selftest():
         print("  → pulse rosso 3s")
         fx.apply_light_tag("rosso", "pulse")
         time.sleep(3)
-        print("  → beep short")
-        fx.beep("short"); time.sleep(0.6)
-        print("  → beep double")
-        fx.beep("double"); time.sleep(0.6)
-        print("  → beep long")
-        fx.beep("long"); time.sleep(0.8)
+        for kind in ("short", "double", "long", "rise", "fall", "alarm", "low"):
+            print(f"  → beep {kind}")
+            fx.beep(kind)
+            time.sleep(1.2)
         print("  → idle")
         fx.idle()
         time.sleep(1)
