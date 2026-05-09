@@ -259,9 +259,10 @@ class StatBar(Static):
     """Barra colorata con etichetta, valore, percentuale."""
 
     DEFAULT_CSS = """
-    StatBar { height: 3; padding: 0 1; }
-    StatBar Label { color: $text-muted; }
-    StatBar ProgressBar { width: 1fr; }
+    StatBar { height: 2; padding: 0; layout: vertical; }
+    StatBar Label { color: $text-muted; height: 1; }
+    StatBar ProgressBar { width: 1fr; height: 1; }
+    StatBar Bar { height: 1; }
     """
 
     def __init__(self, label: str, *, warn: float = 0.7, crit: float = 0.9, **kw):
@@ -297,9 +298,9 @@ class StatusPanel(Horizontal):
     """Pannello stato in cima: barre CPU/RAM/TEMP + modello/host/tok."""
 
     DEFAULT_CSS = """
-    StatusPanel { height: 7; padding: 0 1; border: round $primary; }
+    StatusPanel { height: 9; padding: 0 1; border: round $primary; }
     StatusPanel > .col { width: 1fr; padding: 0 1; }
-    StatusPanel Static.title { color: $accent; text-style: bold; }
+    StatusPanel Static.title { color: $accent; text-style: bold; height: 1; }
     StatusPanel Label { color: $text-muted; }
     .ok ProgressBar > Bar > .bar--bar { color: $success; }
     .warn ProgressBar > Bar > .bar--bar { color: $warning; }
