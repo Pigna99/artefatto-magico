@@ -1,5 +1,13 @@
 #!/bin/bash
 # Lancia la TUI cockpit per default. ARTEFATTO_PLAIN=1 per il REPL semplice.
+# Legge config locale (non in repo) da ~/.config/artefatto/env se esiste.
+ENV_FILE="$HOME/.config/artefatto/env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  . "$ENV_FILE"
+  set +a
+fi
+
 if [ "${ARTEFATTO_PLAIN:-0}" = "1" ]; then
   exec ~/artefatto/.venv/bin/python ~/artefatto/src/repl.py "$@"
 else
