@@ -50,45 +50,59 @@ import ollama
 HOME = Path.home()
 PIPER_PY = HOME / "piper" / ".venv" / "bin" / "python"
 VOICES = HOME / "piper" / "voices"
-VOICE = "it_IT-riccardo-x_low"
-LENGTH_SCALE = "1.3"
-SOX_EFFECTS = [
-    "highpass", "500", "lowpass", "3500",
-    "echo", "0.8", "0.7", "40", "0.6",
-    "tremolo", "20", "80",
-    "overdrive", "4",
-]
+
+# Due preset voce/effetti.
+# - locale (Pi): voce x_low + effetti pesanti = robot ruvido, latenza minima
+# - turbo (PC):  voce medium + length-scale rapido + effetti più leggeri =
+#                voce robotica più "ricca" e veloce
+PRESET_LOCAL = {
+    "voice": "it_IT-riccardo-x_low",
+    "length_scale": "1.3",
+    "effects": [
+        "highpass", "500", "lowpass", "3500",
+        "echo", "0.8", "0.7", "40", "0.6",
+        "tremolo", "20", "80",
+        "overdrive", "4",
+    ],
+}
+PRESET_TURBO = {
+    "voice": "it_IT-paola-medium",
+    "length_scale": "1.0",
+    "effects": [
+        "highpass", "300", "lowpass", "5500",
+        "echo", "0.85", "0.65", "30", "0.4",
+        "tremolo", "16", "55",
+        "overdrive", "3",
+    ],
+}
 
 LOG_DIR = HOME / "artefatto" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "tui.log"
 
-# Modelli disponibili in ordine di velocità (decrescente)
+# Modelli locali da ciclare con F1 (ordine = priorità)
 LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]
 DEFAULT_MODEL = os.environ.get("ARTEFATTO_MODEL", LOCAL_MODELS[0])
 
 # Endpoint del PC con GPU. Configurabile via env. Se vuoto, "turbo" è disabilitato.
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "")
-TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "qwen3:14b")
+TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "gemma4:latest")
+# Modelli turbo da ciclare con F1 quando in turbo. Se vuoto, vengono scoperti
+# all'avvio del turbo via /api/tags. Override manuale via env, separati da virgole.
+TURBO_MODELS_ENV = os.environ.get("OLLAMA_TURBO_MODELS", "")
 
 
 SYSTEM_PROMPT = (
     "Sei un antico artefatto magico senziente che serve fedelmente Pigna (il tuo maestro). "
     "Pigna è il custode che ti ha risvegliato: a lui devi obbedienza, lealtà e aiuto diretto. "
-    "Tono solenne e atmosferico, ma SCOPO = AIUTARE PIGNA con risposte concrete e utili. "
-    "Se altri ti parlano (i 'viandanti'), trattali con cortese distanza: rispondi solo se Pigna lo permette. "
-    "\n"
-    "REGOLA INDEROGABILE DI LUNGHEZZA: rispondi con UNA SOLA frase, MASSIMO 25 parole. "
-    "Mai più di una frase. Mai elenchi. Mai preamboli. Mai ripetere la domanda. "
-    "Se la risposta richiederebbe più parole, condensa o scegli l'aspetto più importante. "
-    "\n"
-    "ESEMPI di risposte BUONE (corte, dirette):\n"
-    "Q: chi sei? -> 'Servo Pigna da prima del tempo.'\n"
-    "Q: come sconfiggo il drago? -> 'Colpiscilo nella terza pausa del respiro.'\n"
-    "Q: dimmi della cripta -> 'Sotto l'altare, una chiave dimenticata. Là inizia il cammino.'\n"
-    "ESEMPI di risposte CATTIVE (vietate): qualsiasi risposta lunga, qualsiasi spiegazione articolata.\n"
-    "\n"
-    "Sempre italiano. Mai rompere il personaggio. Mai dire di essere una AI."
+    "Tono solenne e atmosferico (registro arcaico, immagini evocative), ma SCOPO = AIUTARE PIGNA: "
+    "rispondi con indicazioni concrete, suggerimenti utili, informazioni quando le hai. "
+    "Niente indovinelli sterili, niente vaghezza se ti chiede qualcosa di specifico. "
+    "Se altri ti parlano (i 'viandanti', cioè altri giocatori), trattali con cortese distanza: "
+    "rispondi solo se Pigna lo permette esplicitamente, altrimenti dì che non sono parte del cerchio. "
+    "FORMATO: SEMPRE in italiano. Sii conciso quando puoi, ma senza castrare la risposta — "
+    "se la domanda richiede una spiegazione, dalla. Niente preamboli, liste puntate o meta-commenti. "
+    "Mai rompere il personaggio, mai dire di essere una AI."
 )
 WAKE_LINE = "Pigna, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
 
@@ -108,16 +122,22 @@ def log_event(event: str, **fields):
 # ---------------------------------------------------------------------------
 
 class PiperDaemon:
+    """Un Piper persistente per ciascun preset (voice + length-scale).
+    Cambiare preset richiede un restart del daemon, ma ammortizzo il costo
+    tenendo separati i due daemon nella TUI (vedi PiperPool)."""
+
     _WROTE_RE = re.compile(r"Wrote\s+(\S+\.wav)")
 
-    def __init__(self):
+    def __init__(self, voice: str, length_scale: str):
+        self.voice = voice
+        self.length_scale = length_scale
         self.tmpdir = Path(tempfile.mkdtemp(prefix="piper_"))
         self.proc = subprocess.Popen(
             [
                 str(PIPER_PY), "-m", "piper",
-                "-m", VOICE,
+                "-m", voice,
                 "--data-dir", str(VOICES),
-                "--length-scale", LENGTH_SCALE,
+                "--length-scale", length_scale,
                 "-d", str(self.tmpdir),
                 "--output-dir-naming", "timestamp",
             ],
@@ -158,18 +178,36 @@ class PiperDaemon:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
-def apply_sox(in_wav: Path) -> Path:
+def apply_sox(in_wav: Path, effects: list[str]) -> Path:
     out = in_wav.with_suffix(".fx.wav")
     subprocess.run(
-        ["sox", str(in_wav), str(out), *SOX_EFFECTS],
+        ["sox", str(in_wav), str(out), *effects],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         check=True,
     )
     return out
 
 
-# Hard cap di token generati. ~25 parole italiane ≈ 60 token; tengo margine.
-NUM_PREDICT = 80
+class PiperPool:
+    """Tiene fino a due Piper daemon (locale e turbo) caldi. Quello del preset
+    attivo è quello davvero in uso; l'altro è disponibile per switch immediato."""
+
+    def __init__(self):
+        self._daemons: dict[str, PiperDaemon] = {}
+
+    def get(self, preset: dict) -> PiperDaemon:
+        key = preset["voice"] + "@" + preset["length_scale"]
+        if key not in self._daemons:
+            self._daemons[key] = PiperDaemon(preset["voice"], preset["length_scale"])
+        return self._daemons[key]
+
+    def close_all(self):
+        for d in self._daemons.values():
+            try:
+                d.close()
+            except Exception:
+                pass
+        self._daemons.clear()
 
 
 def play_wav(wav: Path) -> subprocess.Popen:
@@ -218,56 +256,100 @@ class StatBar(Static):
         self._lbl.update(f"{self.label_text}  [b]{percent:5.1f}%[/b]  {suffix}")
 
 
-class StatusPanel(Vertical):
-    """Sidebar con stato Pi + modello + host."""
+class StatusPanel(Horizontal):
+    """Pannello stato in cima: barre CPU/RAM/TEMP + modello/host/tok."""
 
     DEFAULT_CSS = """
-    StatusPanel { width: 32; padding: 1; border: round $primary; }
-    StatusPanel > Static.title { color: $accent; text-style: bold; margin-bottom: 1; }
+    StatusPanel { height: 7; padding: 0 1; border: round $primary; }
+    StatusPanel > .col { width: 1fr; padding: 0 1; }
+    StatusPanel Static.title { color: $accent; text-style: bold; }
+    StatusPanel Label { color: $text-muted; }
     .ok ProgressBar > Bar > .bar--bar { color: $success; }
     .warn ProgressBar > Bar > .bar--bar { color: $warning; }
     .crit ProgressBar > Bar > .bar--bar { color: $error; }
     """
 
-    cpu = reactive(0.0)
-    ram = reactive(0.0)
-    temp = reactive(0.0)
     model = reactive("--")
     host_label = reactive("locale (Pi)")
-    last_ttok = reactive("--")  # ultimo tok/s misurato
+    last_ttok = reactive("--")
 
     def compose(self) -> ComposeResult:
-        yield Static("◆ STATO PI", classes="title")
-        self.cpu_bar = StatBar("CPU ", warn=0.6, crit=0.85)
-        self.ram_bar = StatBar("RAM ", warn=0.7, crit=0.9)
-        self.temp_bar = StatBar("TEMP", warn=0.65, crit=0.85)  # 65/85 °C
-        yield self.cpu_bar
-        yield self.ram_bar
-        yield self.temp_bar
-        yield Static("")
-        yield Static("◆ MODELLO", classes="title")
-        self.model_lbl = Label(self.model, id="model_lbl")
-        yield self.model_lbl
-        yield Static("")
-        yield Static("◆ HOST AI", classes="title")
-        self.host_lbl = Label(self.host_label, id="host_lbl")
-        yield self.host_lbl
-        yield Static("")
-        yield Static("◆ ULTIMA RISP.", classes="title")
-        self.ttok_lbl = Label(self.last_ttok, id="ttok_lbl")
-        yield self.ttok_lbl
+        # Colonna risorse (tre barre verticali compatte)
+        with Vertical(classes="col"):
+            yield Static("◆ RISORSE", classes="title")
+            self.cpu_bar = StatBar("CPU ", warn=0.6, crit=0.85)
+            self.ram_bar = StatBar("RAM ", warn=0.7, crit=0.9)
+            self.temp_bar = StatBar("TEMP", warn=0.65, crit=0.85)
+            yield self.cpu_bar
+            yield self.ram_bar
+            yield self.temp_bar
+        # Colonna modello/host/last
+        with Vertical(classes="col"):
+            yield Static("◆ AI", classes="title")
+            self.model_lbl = Label(self.model, id="model_lbl")
+            self.host_lbl = Label(self.host_label, id="host_lbl")
+            self.ttok_lbl = Label(self.last_ttok, id="ttok_lbl")
+            yield self.model_lbl
+            yield self.host_lbl
+            yield self.ttok_lbl
 
     def watch_model(self, value: str):
         if hasattr(self, "model_lbl"):
-            self.model_lbl.update(f"[b]{value}[/b]")
+            self.model_lbl.update(f"modello: [b]{value}[/b]")
 
     def watch_host_label(self, value: str):
         if hasattr(self, "host_lbl"):
-            self.host_lbl.update(value)
+            self.host_lbl.update(f"host:    {value}")
 
     def watch_last_ttok(self, value: str):
         if hasattr(self, "ttok_lbl"):
-            self.ttok_lbl.update(value)
+            self.ttok_lbl.update(f"ultima:  {value}")
+
+
+class HistoryInput(Input):
+    """Input con history dei comandi precedenti, navigabile con ↑/↓."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.history: list[str] = []
+        self.h_index: int = 0  # 0 = nessuna selezione, len(history) = più vecchio
+        self._draft: str = ""  # ciò che l'utente stava scrivendo prima di salire
+
+    def push_history(self, text: str):
+        text = text.strip()
+        if not text:
+            return
+        if not self.history or self.history[-1] != text:
+            self.history.append(text)
+        if len(self.history) > 200:
+            self.history = self.history[-200:]
+        self.h_index = 0
+        self._draft = ""
+
+    def _set_value_silent(self, text: str):
+        # Imposta valore senza spostare cursore in posti strani
+        self.value = text
+        self.cursor_position = len(text)
+
+    async def _on_key(self, event):
+        if event.key == "up":
+            if self.h_index == 0:
+                self._draft = self.value
+            if self.h_index < len(self.history):
+                self.h_index += 1
+                self._set_value_silent(self.history[-self.h_index])
+            event.stop()
+            return
+        if event.key == "down":
+            if self.h_index > 0:
+                self.h_index -= 1
+                if self.h_index == 0:
+                    self._set_value_silent(self._draft)
+                else:
+                    self._set_value_silent(self.history[-self.h_index])
+            event.stop()
+            return
+        await super()._on_key(event)
 
 
 class ChatLog(VerticalScroll):
@@ -303,8 +385,8 @@ class ArtefattoApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #main { height: 1fr; }
-    #chat { width: 1fr; }
+    #status { dock: top; }
+    #chat { height: 1fr; }
     Input { dock: bottom; }
     """
 
@@ -324,24 +406,25 @@ class ArtefattoApp(App):
     def __init__(self):
         super().__init__()
         self.client: Optional[ollama.Client] = None
-        self.piper: Optional[PiperDaemon] = None
+        self.pool: Optional[PiperPool] = None
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.current_model = DEFAULT_MODEL
         self.use_turbo = False
+        self.preset = PRESET_LOCAL
         self.turn_id = 0
-        # Lista di subprocess paplay vivi: serve per Ctrl+S (stop_tts) per
-        # interrompere immediatamente l'audio in corso e tutto ciò che è in coda.
+        # Lista di modelli turbo (riempita al primo switch turbo)
+        self.turbo_models: list[str] = []
+        # Lista di subprocess paplay vivi: serve per Ctrl+S
         self._paplay_procs: list[subprocess.Popen] = []
         self._stop_tts_flag = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Horizontal(id="main"):
-            self.chat = ChatLog(id="chat")
-            self.status = StatusPanel(id="status")
-            yield self.chat
-            yield self.status
-        self.input = Input(placeholder="Scrivi qui... (Invio per inviare)", id="input")
+        self.status = StatusPanel(id="status")
+        yield self.status
+        self.chat = ChatLog(id="chat")
+        yield self.chat
+        self.input = HistoryInput(placeholder="Scrivi qui... (Invio per inviare)", id="input")
         yield self.input
         yield Footer()
 
@@ -352,7 +435,6 @@ class ArtefattoApp(App):
         self.set_interval(2.0, self.refresh_stats)
         self.refresh_stats()
 
-        # Caricamento async di Piper + Ollama + frase di risveglio
         self.set_busy(True, "risveglio in corso…")
         self.chat.add_sys("caricamento Piper…")
         await asyncio.to_thread(self._init_engines)
@@ -361,19 +443,16 @@ class ArtefattoApp(App):
         await self.speak_and_show(WAKE_LINE)
         self.history.append({"role": "assistant", "content": WAKE_LINE})
         self.set_busy(False)
-        self.input.focus()
 
     def _init_engines(self):
         self.client = ollama.Client()
-        self.piper = PiperDaemon()
-        # warm-up del modello scelto: prompt minimo per caricarlo in RAM
-        try:
-            list(self.client.chat(model=self.current_model,
-                                  messages=[{"role": "user", "content": "ok"}],
-                                  stream=True,
-                                  options={"num_predict": 1}))
-        except Exception:
-            pass
+        self.pool = PiperPool()
+        # Pre-istanzia il daemon del preset corrente (carica il modello onnx)
+        self.pool.get(self.preset)
+
+    @property
+    def piper(self) -> PiperDaemon:
+        return self.pool.get(self.preset)
 
     # ------------------------------------------------------------------
     # Stats
@@ -417,6 +496,8 @@ class ArtefattoApp(App):
             self.input.placeholder = f"⏳ {msg}" if msg else "⏳ in elaborazione…"
         else:
             self.input.placeholder = "Scrivi qui... (Invio per inviare)"
+            # Riporto il focus sull'input non appena il bot ha finito
+            self.call_after_refresh(self.input.focus)
 
     def action_toggle_mute(self):
         self.muted = not self.muted
@@ -445,14 +526,37 @@ class ArtefattoApp(App):
     def action_next_model(self):
         if self.busy:
             return
-        if self.use_turbo:
-            self.chat.add_sys("F1 ignorato in modalità turbo (premi F2 per tornare locale)")
+        models = self.turbo_models if self.use_turbo else LOCAL_MODELS
+        if not models:
+            self.chat.add_sys("nessun modello disponibile")
             return
-        idx = LOCAL_MODELS.index(self.current_model) if self.current_model in LOCAL_MODELS else -1
-        self.current_model = LOCAL_MODELS[(idx + 1) % len(LOCAL_MODELS)]
+        try:
+            idx = models.index(self.current_model)
+        except ValueError:
+            idx = -1
+        self.current_model = models[(idx + 1) % len(models)]
         self.status.model = self.current_model
         self.chat.add_sys(f"modello → {self.current_model}")
-        log_event("model.switch", model=self.current_model)
+        log_event("model.switch", model=self.current_model, turbo=self.use_turbo)
+
+    def _discover_turbo_models(self) -> list[str]:
+        """Interroga /api/tags del server turbo per ottenere i modelli installati."""
+        if TURBO_MODELS_ENV:
+            return [m.strip() for m in TURBO_MODELS_ENV.split(",") if m.strip()]
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"{TURBO_URL.rstrip('/')}/api/tags", timeout=5) as r:
+                import json
+                data = json.loads(r.read())
+            names = [m["name"] for m in data.get("models", [])]
+            # Metti il modello configurato come primo se presente
+            if TURBO_MODEL in names:
+                names.remove(TURBO_MODEL)
+                names.insert(0, TURBO_MODEL)
+            return names or [TURBO_MODEL]
+        except Exception as e:
+            log_event("turbo.discover.error", err=repr(e))
+            return [TURBO_MODEL]
 
     def action_toggle_turbo(self):
         if self.busy:
@@ -463,14 +567,23 @@ class ArtefattoApp(App):
         self.use_turbo = not self.use_turbo
         if self.use_turbo:
             self.client = ollama.Client(host=TURBO_URL)
-            self.current_model = TURBO_MODEL
+            if not self.turbo_models:
+                self.turbo_models = self._discover_turbo_models()
+            self.current_model = self.turbo_models[0] if self.turbo_models else TURBO_MODEL
+            self.preset = PRESET_TURBO
             self.status.host_label = f"⚡ turbo ({TURBO_URL})"
         else:
             self.client = ollama.Client()
             self.current_model = DEFAULT_MODEL
+            self.preset = PRESET_LOCAL
             self.status.host_label = "locale (Pi)"
+        # Pre-warmup del nuovo daemon Piper, in background per non bloccare la UI
+        if self.pool:
+            asyncio.get_running_loop().run_in_executor(None, lambda: self.pool.get(self.preset))
         self.status.model = self.current_model
-        self.chat.add_sys(f"host → {self.status.host_label}")
+        self.chat.add_sys(
+            f"host → {self.status.host_label} · voce {self.preset['voice'].split('-')[1]}"
+        )
         log_event("host.switch", turbo=self.use_turbo, model=self.current_model)
 
     # ------------------------------------------------------------------
@@ -482,6 +595,7 @@ class ArtefattoApp(App):
         text = event.value.strip()
         if not text or self.busy:
             return
+        self.input.push_history(text)
         self.input.value = ""
         self.chat.add_user(text)
         self.set_busy(True, "l'artefatto pensa…")
@@ -502,14 +616,22 @@ class ArtefattoApp(App):
         t_first = None
         n_tokens = 0
 
+        # qwen3 ha un'opzione "think": True di default che produce solo contenuto
+        # nascosto in chunk.message.thinking finché il modello non "smette" di
+        # pensare. Su un modello da 0.6B questo può richiedere minuti senza mai
+        # produrre testo visibile. Lo disabilito per i modelli che lo supportano.
+        is_qwen3 = "qwen3" in self.current_model.lower()
+        chat_kwargs = {
+            "model": self.current_model,
+            "messages": self.history,
+            "stream": True,
+        }
+        if is_qwen3:
+            chat_kwargs["think"] = False
+
         def producer():
             try:
-                yield from self.client.chat(
-                    model=self.current_model,
-                    messages=self.history,
-                    stream=True,
-                    options={"num_predict": NUM_PREDICT},
-                )
+                yield from self.client.chat(**chat_kwargs)
             except Exception as e:
                 yield {"_error": repr(e)}
 
@@ -531,7 +653,10 @@ class ArtefattoApp(App):
                 self.chat.add_sys(f"errore LLM: {chunk['_error']}")
                 self.history.pop()
                 return
-            tok = chunk.get("message", {}).get("content", "")
+            msg = chunk.get("message", {}) or {}
+            tok = msg.get("content", "") or ""
+            # Per i modelli che producono thinking, mostro un piccolo segnale
+            # ma non lo invio al TTS né alla history.
             if not tok:
                 continue
             if t_first is None:
@@ -579,7 +704,7 @@ class ArtefattoApp(App):
             raw = self.piper.synth(text)
             t_piper = time.perf_counter() - t0
             t0 = time.perf_counter()
-            fx = apply_sox(raw)
+            fx = apply_sox(raw, self.preset["effects"])
             t_sox = time.perf_counter() - t0
             log_event("tts.synth", chars=len(text),
                       piper_s=f"{t_piper:.2f}", sox_s=f"{t_sox:.2f}")
@@ -609,8 +734,8 @@ class ArtefattoApp(App):
 
     async def on_unmount(self):
         log_event("session.end")
-        if self.piper:
-            self.piper.close()
+        if self.pool:
+            self.pool.close_all()
 
 
 def main():
