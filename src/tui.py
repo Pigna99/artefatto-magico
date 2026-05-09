@@ -100,6 +100,7 @@ LOG_FILE = LOG_DIR / "tui.log"
 # se la rete e' raggiungibile, altrimenti fallback a Piper.
 EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
 EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "it-IT-DiegoNeural")
+EDGE_TTS_RATE = os.environ.get("EDGE_TTS_RATE", "+50%")
 
 # Modelli locali da ciclare con F1 (ordine = priorità)
 LOCAL_MODELS = ["gemma3:270m", "qwen3:0.6b", "gemma3:1b"]
@@ -639,7 +640,8 @@ class ArtefattoApp(App):
             if EDGE_TTS_ENABLED and AllTalkClient is not None:
                 try:
                     if self.alltalk is None:
-                        self.alltalk = AllTalkClient(voice=EDGE_TTS_VOICE)
+                        self.alltalk = AllTalkClient(voice=EDGE_TTS_VOICE,
+                                                     rate=EDGE_TTS_RATE)
                     if self.alltalk.is_ready(timeout=2.0):
                         self.chat.add_sys(f"TTS remoto attivo · {EDGE_TTS_VOICE}")
                     else:
