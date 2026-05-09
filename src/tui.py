@@ -394,7 +394,11 @@ class ArtefattoApp(App):
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
         ("f5", "toggle_mute", "Mute TTS"),
-        ("ctrl+s", "stop_tts", "Stop voce"),
+        # Stop voce: F8 è la combinazione affidabile (Ctrl+S/Ctrl+Q vengono
+        # spesso ingoiati dal terminale come XOFF/XON). Lascio anche ctrl+x
+        # come alias per chi ha quella muscle memory.
+        ("f8", "stop_tts", "Stop voce"),
+        ("ctrl+x", "stop_tts", "Stop voce"),
         ("ctrl+c", "quit", "Esci"),
     ]
 
@@ -423,7 +427,7 @@ class ArtefattoApp(App):
         # Barra keybindings custom in cima (subito sotto l'header)
         yield Static(
             "[b]F1[/b] modello   [b]F2[/b] locale↔turbo   "
-            "[b]F5[/b] mute   [b]Ctrl+S[/b] stop voce   [b]Ctrl+C[/b] esci",
+            "[b]F5[/b] mute   [b]F8[/b] stop voce   [b]Ctrl+C[/b] esci",
             id="keys",
         )
         self.status = StatusPanel(id="status")
