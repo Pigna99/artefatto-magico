@@ -156,11 +156,16 @@ class ArtefattoApp(App):
             )
         self.chat.add_sys(f"pronto · modello {self.current_model}")
         log_event("session.start", model=self.current_model, session_id=self.session_id)
-        await self.speak_and_show(WAKE_LINE)
+        # Mostra subito il messaggio + libera la UI; il TTS parte in background
+        # così l'utente può già scrivere senza aspettare che la voce finisca.
+        widget = self.chat.add_art_start()
+        widget.update(f"[b]◈[/b]   [i]{WAKE_LINE}[/i]")
         self.history.append({"role": "assistant", "content": WAKE_LINE})
         if self.db and self.session_id:
             self.db.log_message(self.session_id, "assistant", WAKE_LINE)
         self.set_busy(False)
+        if not self.muted:
+            asyncio.create_task(asyncio.to_thread(self._speak_one, WAKE_LINE))
 
     def _init_engines(self):
         self.client = ollama.Client()
