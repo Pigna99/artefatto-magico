@@ -64,7 +64,7 @@ def chat_kwargs(model: str, messages: list[dict]) -> dict:
 
 
 async def stream_chat(client, kwargs: dict) -> AsyncIterator[dict]:
-    """Wrap streaming Ollama come async-iterable. Cattura eccezioni come
+    """Wrap streaming come async-iterable. Cattura eccezioni come
     chunk speciale {'_error': ...} per non far esplodere il chiamante."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
@@ -83,3 +83,66 @@ async def stream_chat(client, kwargs: dict) -> AsyncIterator[dict]:
         if chunk is None:
             return
         yield chunk
+
+
+class OpenAIClient:
+    """Client minimale che imita l'API di ollama.Client.chat() ma parla
+    OpenAI-compatible endpoint (LM Studio, vLLM, ecc.).
+
+    Espone solo chat(model, messages, stream, **) per essere drop-in
+    sostituibile a ollama.Client nel resto del codice.
+    """
+
+    def __init__(self, base_url: str, api_key: str = "lm-studio"):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    def chat(self, *, model: str, messages: list[dict], stream: bool = True,
+             think: Optional[bool] = None, **kwargs):
+        """Mimics ollama.chat() output schema:
+        - stream=True: yield {'message': {'content': tok}}
+        - stream=False: return {'message': {'content': full_text}}
+        Il param `think` di qwen3 è ignorato (l'OpenAI API standard non lo
+        supporta; LM Studio ha le sue impostazioni nel preset del modello).
+        """
+        import urllib.request, json
+        body = {"model": model, "messages": messages, "stream": stream}
+        # Inoltro eventuali parametri OpenAI noti
+        for k in ("temperature", "top_p", "max_tokens", "stop"):
+            if k in kwargs:
+                body[k] = kwargs[k]
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+        if not stream:
+            resp = json.loads(urllib.request.urlopen(req, timeout=180).read())
+            content = resp["choices"][0]["message"].get("content", "") or ""
+            return {"message": {"content": content}}
+
+        # Streaming SSE
+        def _iter():
+            with urllib.request.urlopen(req, timeout=180) as r:
+                for line in r:
+                    line = line.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data)
+                    except Exception:
+                        continue
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    tok = delta.get("content", "")
+                    if tok:
+                        yield {"message": {"content": tok}}
+        return _iter()

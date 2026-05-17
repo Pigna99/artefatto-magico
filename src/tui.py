@@ -41,15 +41,15 @@ import ollama
 
 from config import (
     DB_PATH, DEFAULT_MODEL, LOCAL_MODELS, PRESET_LOCAL, PRESET_TURBO,
-    SYSTEM_PROMPT, TURBO_MODEL, TURBO_MODELS_ENV, TURBO_URL, WAKE_LINE,
-    EDGE_TTS_ENABLED, EDGE_TTS_VOICE, EDGE_TTS_RATE, log_event,
+    SYSTEM_PROMPT, TURBO_BACKEND, TURBO_MODEL, TURBO_MODELS_ENV, TURBO_URL,
+    WAKE_LINE, EDGE_TTS_ENABLED, EDGE_TTS_VOICE, EDGE_TTS_RATE, log_event,
 )
 from widgets import ChatLog, HistoryInput, StatusPanel
 from tts import (
     PiperDaemon, PiperPool, apply_sox, sanitize_for_tts, split_sentences,
     AllTalkClient,
 )
-from llm import build_messages_with_rag, chat_kwargs, stream_chat
+from llm import OpenAIClient, build_messages_with_rag, chat_kwargs, stream_chat
 from commands import handle_slash
 from audio import AudioPlayer
 
@@ -301,7 +301,15 @@ class ArtefattoApp(App):
             return
         self.use_turbo = not self.use_turbo
         if self.use_turbo:
-            self.client = ollama.Client(host=TURBO_URL)
+            if TURBO_BACKEND == "openai":
+                # LM Studio (OpenAI-compatible). URL deve includere /v1 oppure
+                # lo aggiungiamo noi se manca.
+                base = TURBO_URL.rstrip("/")
+                if not base.endswith("/v1"):
+                    base = base + "/v1"
+                self.client = OpenAIClient(base_url=base)
+            else:
+                self.client = ollama.Client(host=TURBO_URL)
             if not self.turbo_models:
                 self.turbo_models = self._discover_turbo_models()
             self.current_model = self.turbo_models[0] if self.turbo_models else TURBO_MODEL
@@ -341,9 +349,17 @@ class ArtefattoApp(App):
             return [m.strip() for m in TURBO_MODELS_ENV.split(",") if m.strip()]
         try:
             import urllib.request, json
-            with urllib.request.urlopen(f"{TURBO_URL.rstrip('/')}/api/tags", timeout=5) as r:
-                data = json.loads(r.read())
-            names = [m["name"] for m in data.get("models", [])]
+            base = TURBO_URL.rstrip("/")
+            if TURBO_BACKEND == "openai":
+                # LM Studio: endpoint OpenAI /v1/models, formato diverso
+                url = base + ("/v1/models" if not base.endswith("/v1") else "/models")
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    data = json.loads(r.read())
+                names = [m["id"] for m in data.get("data", [])]
+            else:
+                with urllib.request.urlopen(f"{base}/api/tags", timeout=5) as r:
+                    data = json.loads(r.read())
+                names = [m["name"] for m in data.get("models", [])]
             if TURBO_MODEL in names:
                 names.remove(TURBO_MODEL)
                 names.insert(0, TURBO_MODEL)

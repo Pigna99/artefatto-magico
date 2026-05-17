@@ -23,8 +23,11 @@ LOCAL_MODELS = ["qwen3:0.6b", "gemma3:1b"]
 DEFAULT_MODEL = os.environ.get("ARTEFATTO_MODEL", LOCAL_MODELS[0])
 
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "")
-TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "gemma4:latest")
+TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "gemma-4-e4b-it")
 TURBO_MODELS_ENV = os.environ.get("OLLAMA_TURBO_MODELS", "")
+# Backend del turbo: "ollama" (default) o "openai" (per LM Studio).
+# LM Studio espone API OpenAI-compatible sulla porta 1234 di default.
+TURBO_BACKEND = os.environ.get("ARTEFATTO_TURBO_BACKEND", "ollama")
 
 # Edge-TTS (cloud Microsoft, free) per modalità turbo.
 EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
