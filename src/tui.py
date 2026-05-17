@@ -49,7 +49,7 @@ from tts import (
     PiperDaemon, PiperPool, apply_sox, sanitize_for_tts, split_sentences,
     AllTalkClient,
 )
-from llm import OpenAIClient, build_messages_with_rag, chat_kwargs, stream_chat
+from llm import OpenAIClient, StickyContext, build_messages_with_rag, chat_kwargs, stream_chat
 from commands import handle_slash
 from audio import AudioPlayer
 
@@ -119,6 +119,9 @@ class ArtefattoApp(App):
         self.turn_id = 0
         self.turbo_models: list[str] = []
         self.audio = AudioPlayer()
+        # Sticky RAG context: tiene i match degli ultimi 2 turni per evitare
+        # che il 3° turno perda il filo (multi-turn coherence).
+        self.sticky = StickyContext(max_turns=2)
 
     # ------------------------------------------------------------------
     # Layout + lifecycle
@@ -414,7 +417,7 @@ class ArtefattoApp(App):
         turn = self.turn_id
 
         messages, lore_matches, codex_matches, _, _ = build_messages_with_rag(
-            self.history, user_text, self.db,
+            self.history, user_text, self.db, sticky=self.sticky,
         )
         if lore_matches or codex_matches:
             lore_names = ",".join(m.name for m in lore_matches) or "-"

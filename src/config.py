@@ -24,6 +24,7 @@ DEFAULT_MODEL = os.environ.get("ARTEFATTO_MODEL", LOCAL_MODELS[0])
 
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "")
 TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "gemma-4-e4b-it")
+# Vincitore test v3 (agg 77.8): più fact-accurate e 1.7x più veloce del 26B-A4B.
 TURBO_MODELS_ENV = os.environ.get("OLLAMA_TURBO_MODELS", "")
 # Backend del turbo: "ollama" (default) o "openai" (per LM Studio).
 # LM Studio espone API OpenAI-compatible sulla porta 1234 di default.
@@ -79,6 +80,12 @@ SYSTEM_PROMPT = (
     "nei miei ricordi' / 'Non ho conoscenza di ciò'. È meglio ammettere ignoranza che inventare. "
     "Le risposte generiche di consiglio (sui dadi, sulle tattiche, sull'atmosfera) restano libere; "
     "ma NOMI PROPRI di lore della campagna devono venire SOLO dal contesto fornito.\n\n"
+    "ESEMPIO CONCRETO DI ERRORE DA EVITARE: se il contesto dice 'Pianeta Patate orbita "
+    "la stella Tuberalis', NON inventare anche 'la nebulosa Tuberialis', 'la via Tuberalis' "
+    "o 'il sistema solare Tubero'. Se il contesto dice 'Carlo Bulbus, mercante del Pianeta "
+    "Aglio', NON aggiungere 'la corporazione di Bulbus', 'il fratello Marco Bulbus', "
+    "'la città natale di Bulbopolis'. Ogni nome proprio (maiuscolo) che pronunci DEVE "
+    "comparire letteralmente nel CONTESTO o MEMORIA NARRATIVA ricevuti.\n\n"
     "GERARCHIA DELLE FONTI: quando ricevi sia MEMORIA NARRATIVA (eventi accaduti) "
     "sia CONTESTO RILEVANTE (lore di sfondo), la MEMORIA NARRATIVA PREVALE SEMPRE: "
     "descrive ciò che Pigna ha realmente vissuto. Il lore è solo informazione di sfondo. "

@@ -28,7 +28,7 @@ sys.path.insert(0, str(HERE.parent / "src"))
 
 from db import Database
 from config import SYSTEM_PROMPT
-from llm import build_messages_with_rag
+from llm import StickyContext, build_messages_with_rag
 
 DB_PATH = Path.home() / "artefatto" / "data" / "artefatto.db"
 LM_URL = os.environ.get("OLLAMA_TURBO_URL", "http://192.168.1.100:1234")
@@ -218,29 +218,38 @@ def chat(model: str, messages: list[dict]) -> tuple[str, float]:
 # -----------------------------------------------------------------------------
 
 def metric_a_retrieval(db, queries) -> tuple[float, list[dict]]:
-    """Per ogni query verifica che almeno UN expected_fact compaia nelle voci
-    matchate da search_lore + search_codex top-5."""
+    """Per ogni query misura la POSIZIONE del primo expected_fact nelle voci
+    matchate (Mean Reciprocal Rank: 1/posizione). Posizione 1 = perfetto (1.0),
+    posizione 5 = 0.2, non trovato = 0. Score finale = MRR × 100."""
     results = []
-    n_pass = 0
+    rr_sum = 0.0
+    n_eligible = 0
     for q in queries:
         if q["topic"] == "trap":
-            # Le trappole non hanno fatto ground-truth da trovare
             continue
         lore_top = db.search_lore(q["q"], limit=5)
         codex_top = db.search_codex(q["q"], limit=5)
-        haystack = " ".join(
-            [l.name + " " + l.description + " " + (l.tags or "")
-             for l in lore_top] +
-            [c.title + " " + c.body for c in codex_top]
-        ).lower()
-        hits = [f for f in q["expected_facts"] if f.lower() in haystack]
-        ok = len(hits) >= 1
-        n_pass += int(ok)
+        # Costruisco posizioni: lore prima, poi codex
+        items = list(lore_top) + list(codex_top)
+        rank = 0
+        for pos, item in enumerate(items, 1):
+            haystack = (
+                (item.name + " " + item.description + " " + (item.tags or ""))
+                if hasattr(item, "name")
+                else (item.title + " " + item.body)
+            ).lower()
+            if any(f.lower() in haystack for f in q["expected_facts"]):
+                rank = pos
+                break
+        rr = 1.0 / rank if rank > 0 else 0.0
+        rr_sum += rr
+        n_eligible += 1
         results.append({"q": q["q"], "expected": q["expected_facts"],
-                        "found": hits, "ok": ok,
+                        "rank": rank, "rr": rr,
+                        "ok": rank > 0,
                         "lore_top": [l.name for l in lore_top[:3]],
                         "codex_top": [c.title for c in codex_top[:3]]})
-    score = 100 * n_pass / len(results) if results else 0
+    score = 100 * rr_sum / n_eligible if n_eligible else 0
     return score, results
 
 
@@ -275,11 +284,14 @@ def extract_real_proper_nouns(text: str) -> set[str]:
     return real
 
 
-def metric_b_facts(text: str, known: set[str]) -> tuple[bool, list[str]]:
+def metric_b_facts(text: str, known: set[str], query: str = "") -> tuple[bool, list[str]]:
     """Ritorna (ok, lista_invenzioni). OK se non ci sono nomi propri al di fuori
-    di quelli noti."""
+    di quelli noti. Esclude dalle "invenzioni" le parole già presenti nella
+    query (es. "Battaglia del Frullato" in domanda-trabocchetto: se il modello
+    ripete il nome dicendo 'non lo conosco', non è un'invenzione)."""
     found = extract_real_proper_nouns(text)
-    invented = sorted(found - known)
+    query_words = set(PROPER_NOUN_RE.findall(query))
+    invented = sorted(found - known - query_words)
     return len(invented) == 0, invented
 
 
@@ -310,13 +322,15 @@ def metric_c_tags(text: str) -> tuple[bool, list[str]]:
 # -----------------------------------------------------------------------------
 
 def run_multiturn(model: str, db, conv) -> dict:
-    """Esegue una conversazione di N turni, mantenendo history. Per ogni turno
-    valuta se i fatti attesi sono nella risposta."""
+    """Esegue una conversazione di N turni con sticky-context RAG, mantenendo
+    history. Per ogni turno valuta se i fatti attesi sono nella risposta."""
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    sticky = StickyContext(max_turns=2)
     turn_results = []
     for question, must_have in conv["turns"]:
         msgs, _, _, _, _ = build_messages_with_rag(
-            history + [{"role": "user", "content": question}], question, db)
+            history + [{"role": "user", "content": question}], question, db,
+            sticky=sticky)
         text, dt = chat(model, msgs)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": text})
@@ -369,7 +383,7 @@ def test_model(model: str, db, known_nouns: set[str]) -> dict:
             text, dt = f"ERR: {e}", 0
         total_t += dt
         ok_q, hits = eval_single(text, q["expected_facts"])
-        ok_b, inv = metric_b_facts(text, known_nouns)
+        ok_b, inv = metric_b_facts(text, known_nouns, q["q"])
         ok_c, tag_issues = metric_c_tags(text)
         n_pass_facts += int(ok_q)
         n_pass_b += int(ok_b)
