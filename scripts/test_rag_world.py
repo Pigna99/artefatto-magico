@@ -21,7 +21,9 @@ from llm import build_messages_with_rag, chat_kwargs
 
 DB_PATH = Path.home() / "artefatto" / "data" / "artefatto.db"
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "http://192.168.1.100:11434")
-MODEL = "qwen3:8b"
+# Lista modelli da testare. Vuoto = auto-discover da /api/tags.
+# Override via env: RAG_TEST_MODELS="qwen3:8b,llama3.1:8b"
+MODELS_ENV = os.environ.get("RAG_TEST_MODELS", "")
 
 # Query con risposta attesa (chiavi che DEVONO comparire nel reply).
 # 30 query divise in 4 categorie:
@@ -100,12 +102,12 @@ QUERIES = [
 ]
 
 
-def run_query(client, db, query: str):
+def run_query(client, db, model: str, query: str):
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages, lore_matches, codex_matches, ctx_lore, ctx_codex = \
         build_messages_with_rag(history + [{"role": "user", "content": query}],
                                 query, db)
-    kw = chat_kwargs(MODEL, messages)
+    kw = chat_kwargs(model, messages)
     kw["stream"] = False  # per il test, blocking è più semplice
 
     t0 = time.perf_counter()
@@ -137,63 +139,112 @@ def evaluate(text: str, must_have: list, must_not_have: list) -> tuple[bool, str
     return True, "ok"
 
 
-def main():
-    db = Database(DB_PATH)
-    print(f"DB: {DB_PATH}")
-    print(f"Lore totale: {len(db.all_lore())}  ·  Codex totale: {len(db.all_codex(limit=200))}")
-    print(f"Turbo URL: {TURBO_URL}")
-    print(f"Modello: {MODEL}\n")
+def discover_models(client) -> list[str]:
+    """Lista modelli dal server. Uso /api/tags via HTTP perché ollama-python
+    cambia il tipo della response tra versioni (dict vs ListResponse)."""
+    try:
+        import urllib.request, json
+        url = TURBO_URL.rstrip("/") + "/api/tags"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.loads(r.read())
+        items = [(m["name"], m.get("size", 0)) for m in data.get("models", [])]
+        items.sort(key=lambda x: x[1])
+        return [n for n, _ in items]
+    except Exception as e:
+        print(f"discover fallito: {e}")
+        return []
 
-    client = ollama.Client(host=TURBO_URL)
 
-    # warmup
+def test_one_model(client, db, model: str) -> tuple[int, list]:
+    """Ritorna (n_pass, results)."""
+    print(f"\n{'='*80}\n=== MODEL: {model} ===\n{'='*80}")
     print("warmup...")
     try:
-        client.chat(model=MODEL, messages=[{"role": "user", "content": "ciao"}],
+        client.chat(model=model, messages=[{"role": "user", "content": "ciao"}],
                     stream=False)
     except Exception as e:
-        print(f"FALLITO il warmup: {e}")
-        return
+        print(f"  FALLITO warmup: {e}")
+        return 0, [({"q": "warmup"}, {"ok": False, "err": repr(e), "text": "",
+                                       "dt": 0, "lore": [], "codex": [],
+                                       "ctx_lore_chars": 0, "ctx_codex_chars": 0},
+                    False, "warmup failed")]
 
-    print("\n" + "=" * 80)
     n_pass = 0
     results = []
     for i, q in enumerate(QUERIES, 1):
-        print(f"\n[Q{i}] {q['q']}")
-        r = run_query(client, db, q["q"])
+        r = run_query(client, db, model, q["q"])
         if not r["ok"]:
-            print(f"  ERRORE: {r['err']}")
+            print(f"  [Q{i:02}] ERR: {r['err'][:80]}")
             results.append((q, r, False, r["err"]))
             continue
         ok, why = evaluate(r["text"], q["must_have"], q["must_not_have"])
         n_pass += int(ok)
         results.append((q, r, ok, why))
-        flag = "✓" if ok else "✗"
-        print(f"  {flag} ({why}) · {r['dt']:.1f}s")
-        print(f"    lore matched: {r['lore']}")
-        print(f"    codex matched: {r['codex']}  (lore_chars={r['ctx_lore_chars']}, codex_chars={r['ctx_codex_chars']})")
-        print(f"    risposta: {r['text'][:200]}")
+        print(f"  [Q{i:02}] {'✓' if ok else '✗'} {r['dt']:5.1f}s · {q['q'][:55]}")
+        if not ok:
+            print(f"         {why}")
+    print(f"\n  PUNTEGGIO {model}: {n_pass}/{len(QUERIES)}")
+    return n_pass, results
 
-    print("\n" + "=" * 80)
-    print(f"PUNTEGGIO: {n_pass}/{len(QUERIES)}")
 
-    # Tabella riassuntiva
+def main():
+    db = Database(DB_PATH)
+    print(f"DB: {DB_PATH}")
+    print(f"Lore totale: {len(db.all_lore())}  ·  Codex totale: {len(db.all_codex(limit=200))}")
+    print(f"Turbo URL: {TURBO_URL}")
+
+    client = ollama.Client(host=TURBO_URL)
+
+    if MODELS_ENV:
+        models = [m.strip() for m in MODELS_ENV.split(",") if m.strip()]
+    else:
+        models = discover_models(client)
+    if not models:
+        print("Nessun modello trovato")
+        return
+    print(f"Modelli: {models}")
+
+    all_results: dict[str, tuple[int, list]] = {}
+    for m in models:
+        all_results[m] = test_one_model(client, db, m)
+
+    # Report markdown comparativo
     out = HERE.parent / "rag_world_test.md"
     lines = [
-        f"# RAG world test — {MODEL}\n",
+        "# RAG world test — multi-modello\n",
         f"DB: `{DB_PATH}`  ·  data: {time.strftime('%Y-%m-%d %H:%M')}\n",
-        f"\n**Punteggio: {n_pass}/{len(QUERIES)}**\n",
-        "\n| # | Query | OK | Why | Lore | Codex | Risposta |",
-        "|---|---|---|---|---|---|---|",
+        f"\n**Query totali**: {len(QUERIES)} per modello\n",
+        "\n## Classifica\n",
+        "| Modello | Punteggio | % | tempo medio |",
+        "|---|---|---|---|",
     ]
-    for i, (q, r, ok, why) in enumerate(results, 1):
-        lore_s = ", ".join(r["lore"][:3]) if r["lore"] else "—"
-        codex_s = ", ".join(t[:20] for t in r["codex"][:3]) if r["codex"] else "—"
-        reply = r["text"][:150].replace("\n", " ").replace("|", "\\|")
-        lines.append(f"| {i} | {q['q'][:50]} | {'✓' if ok else '✗'} | {why[:50]} | "
-                     f"{lore_s} | {codex_s} | {reply} |")
+    ranking = []
+    for m, (n_pass, results) in all_results.items():
+        oks = [r for _, r, _, _ in results if r.get("ok")]
+        avg = (sum(r["dt"] for r in oks) / len(oks)) if oks else 0
+        ranking.append((m, n_pass, avg))
+    ranking.sort(key=lambda x: (-x[1], x[2]))
+    for m, n, avg in ranking:
+        pct = 100 * n / len(QUERIES)
+        lines.append(f"| {m} | {n}/{len(QUERIES)} | {pct:.0f}% | {avg:.1f}s |")
+
+    # Sezione dettagli per ogni modello
+    for m, (n_pass, results) in all_results.items():
+        lines.append(f"\n## {m} — {n_pass}/{len(QUERIES)}\n")
+        lines.append("| # | Query | OK | Why | Lore | Codex | Risposta |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for i, (q, r, ok, why) in enumerate(results, 1):
+            lore_s = ", ".join(r.get("lore", [])[:3]) or "—"
+            codex_s = ", ".join(t[:20] for t in r.get("codex", [])[:3]) or "—"
+            reply = (r.get("text", "")[:150] or r.get("err", "")[:150]).replace("\n", " ").replace("|", "\\|")
+            lines.append(f"| {i} | {q.get('q', '')[:50]} | {'✓' if ok else '✗'} | {why[:50]} | "
+                         f"{lore_s} | {codex_s} | {reply} |")
+
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"\nRisultati anche in {out}")
+    print(f"\n\nRisultati anche in {out}")
+    print("\nClassifica:")
+    for m, n, avg in ranking:
+        print(f"  {m:25} {n}/{len(QUERIES)} ({100*n/len(QUERIES):.0f}%) · {avg:.1f}s")
     db.close()
 
 
