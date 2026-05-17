@@ -29,32 +29,136 @@ cd ~/artefatto && .venv/bin/python src/gpio_fx.py test
 ```
 Cicla 7 colori → pulse rosso → 7 pattern beep → stati idle/thinking/speaking.
 
-## Modelli AI (post full-test 2026-05-17)
+## Modelli AI (stato 2026-05-17)
 
-**Locale (sul Pi):** `LOCAL_MODELS = ["qwen3:0.6b", "gemma3:1b"]`
-- Default: `qwen3:0.6b` (più veloce e accurato di gemma3:1b in pratica).
-- `gemma3:270m` rimosso: produceva risposte vuote nei test.
+**Locale (sul Pi, via Ollama):** `LOCAL_MODELS = ["qwen3:0.6b", "gemma3:1b"]`
+- Default: `qwen3:0.6b`. Solo 600M parametri → tende a inventare quando il
+  lore è breve. Per uso reale conviene passare a turbo con F2.
 
-**Turbo (sul PC RX 6800):** `OLLAMA_TURBO_MODEL=gemma4:latest`
-- Vincitore del world-test v2: 30/30 a 7-12s/risposta (lento ma rigoroso).
-- Verificato qualitativamente su 6 query "trappola" con dettagli sottili
-  (Solanum Magnum, lune Bollita/Arrosto/Lessa): aderisce al lore, non
-  inventa, parafrasa con eleganza.
-- `aya-expanse:8b` è 28/30 ma in pratica INVENTA quando il lore è breve
-  (mescola Cipolla con Patate, confonde Eclissi Olio con stagioni delle
-  lune). Veloce (2.3s) ma poco affidabile.
-- `qwen3:8b`, `qwen2.5:14b`, `granite3.1-dense:8b` ~26/30, alternative
-  intermedie per quando serve risposta rapida.
+**Turbo (sul PC RX 6800, via LM Studio Vulkan):**
+- Backend: `ARTEFATTO_TURBO_BACKEND=openai`, URL: `http://192.168.1.100:1234`
+- Default attuale: `gemma-4-e4b-it` (Q8_0, ~7.5GB)
+- Alternativa più ricca (lento): `gemma-4-26b-a4b-it` (Q2_K_XL, ~9.8GB)
+- LM Studio + Vulkan dà ~30 tps su RX 6800 contro ~8-10 di Ollama (bug
+  Ollama 0.24 con architettura attention ibrida di gemma4; vedi issue
+  #15286, #15368, #15601 nel repo Ollama).
+
+**Storico modelli testati e scartati:**
+- `aya-expanse:8b`: alto fact-recall ma INVENTA significato dei nomi
+  (Solanum Magnum scambiato per luna, ecc.).
+- `gemma3:270m`: produceva risposte vuote.
+- `llama3.1:8b`, `mistral-nemo:12b`: crollano sul confronto codex vs lore.
+- `gemma3:27b`: 14s/risposta per pari punteggio del 12b — pessimo ROI.
+- `gemma4:latest` su Ollama: ottimo qualitativamente (30/30) ma lento
+  per bug Ollama-gemma4. Su LM Studio è velocissimo.
 
 ## File di config locale sul Pi
 `~/.config/artefatto/env` (NON in git):
 ```
-ARTEFATTO_MODEL=gemma3:270m
-OLLAMA_TURBO_URL=http://192.168.1.100:11434
-OLLAMA_TURBO_MODEL=gemma4:latest
+ARTEFATTO_MODEL=qwen3:0.6b
+OLLAMA_TURBO_URL=http://192.168.1.100:1234
+OLLAMA_TURBO_MODEL=gemma-4-e4b-it
+ARTEFATTO_TURBO_BACKEND=openai
 ARTEFATTO_BUZZ_TYPE=passive
-ARTEFATTO_LED_ANODE=1
+ARTEFATTO_LED_ANODE=0
+ARTEFATTO_LED_INVERT=0
+ARTEFATTO_LED_GAIN_R=1.0
+ARTEFATTO_LED_GAIN_G=0.6
+ARTEFATTO_LED_GAIN_B=0.5
 ```
+
+## Suite di test RAG
+
+Esistono **tre script di test** in `scripts/`, in ordine di rigore:
+
+### `scripts/full_test.py` — bench iniziale modelli locali+turbo
+Test storico: 3 query RAG su lore "Pianeta Patate" per ogni modello.
+Misura tempo, TTFT, tps, presenza tag, RAG matched. Output:
+`full_test_results.md`. Usato per shortlistare modelli candidati.
+
+### `scripts/test_rag_world.py` — world test 30-query (matcher keyword)
+30 query strutturate (codex-first temporali, codex-first specifiche,
+lore puro, miste, edge case) con verifica via matcher keyword (presenza
+di `must_have` literals). Limite: keyword binarie, no check di
+non-invenzione. Output: `rag_world_test.md`.
+
+Lancio:
+```bash
+ssh artefatto "cd ~/artefatto && set -a && source ~/.config/artefatto/env && set +a && \
+  RAG_TEST_MODELS='gemma-4-e4b-it,gemma-4-26b-a4b-it' \
+  nohup .venv/bin/python -u scripts/test_rag_world.py > /tmp/rag.log 2>&1 &"
+```
+
+### `scripts/test_rag_v3.py` — multi-livello 4 metriche (PREFERITO)
+Test più rigoroso e significativo. Per ogni modello misura:
+
+| Metrica | Peso | Cosa misura |
+|---|---|---|
+| **A. Retrieval** | 20% | MRR (Mean Reciprocal Rank) della voce giusta nei top-5 lore/codex |
+| **B. Fact accuracy** | 35% | Risposta NON contiene nomi propri assenti dal DB (anti-allucinazione) |
+| **C. Tag validity** | 15% | Tutti `[LIGHT/BEEP/MOOD]` usano valori del vocabolario chiuso |
+| **D. Multi-turn coherence** | 30% | 5 conversazioni × 3 turni: mantiene il filo con sticky-context |
+
+Output: `rag_v3_test.md` con classifica aggregata + dettagli per modello.
+
+Lancio:
+```bash
+ssh artefatto "cd ~/artefatto && set -a && source ~/.config/artefatto/env && set +a && \
+  RAG_V3_MODELS='gemma-4-e4b-it,gemma-4-26b-a4b-it' \
+  nohup .venv/bin/python -u scripts/test_rag_v3.py > /tmp/v3.log 2>&1 &"
+```
+
+### Come aggiungere un nuovo modello al test
+
+1. Scaricare il GGUF in LM Studio (UI Discover → bartowski / lmstudio-community)
+2. Verificare disponibilità: `curl http://192.168.1.100:1234/v1/models`
+3. Lanciare il test v3 passando il modello in `RAG_V3_MODELS=`
+4. Confrontare l'**aggregato** con gemma-4-e4b-it (baseline 77.8)
+5. Se vincente: aggiornare `OLLAMA_TURBO_MODEL` nell'env Pi
+
+### Come popolare il DB di test
+Lo script `scripts/seed_test_world.py` carica nel DB locale (Pi):
+- 15 voci di lore (5 pianeti vegetali, cosmologia delle Sette Spirali,
+  4 divinità, 3 eventi)
+- 10 voci di codex (viaggio narrativo "Pianeta Cipolla" in 10 capitoli)
+
+Lanciare una volta sola dopo un reset DB:
+```bash
+ssh artefatto "~/artefatto/.venv/bin/python ~/artefatto/scripts/seed_test_world.py"
+```
+
+## Ranking modelli (test v3 multi-livello)
+
+| Modello | Aggregato | A retr | B fact | C tags | D multi | Tempo |
+|---|---|---|---|---|---|---|
+| gemma-4-e4b-it | **77.8** | 95% | 68% | 100% | 67% | 2.0s |
+| gemma-4-26b-a4b-it | 74.2 | 95% | 52% | 100% | 73% | 3.4s |
+
+Test v3 (5 conv multi-turn + 25 single) è molto più discriminante del
+v2 (30 query keyword binarie) — quest'ultimo aveva varianza ±2 punti
+fra run identici, mentre v3 è stabile.
+
+## Fix RAG storici (cronologia decisioni)
+
+- **Codex davanti al lore nel prompt** (`src/llm.py`): i modelli pesano
+  di più ciò che vedono prima. Memoria narrativa recente prevale sul
+  lore generale per query temporali.
+- **Lore limit dinamico** (`src/llm.py`): con codex matched limit=3
+  (era 5), riduce il rumore del lore generale che annacquava il codex.
+- **Name-boost in search_lore** (`src/db/lore.py`): se la query contiene
+  letteralmente il nome di una lore entry, va in cima. Ordinato per
+  numero di parole della query trovate nel nome (es. "Pianeta Carota"
+  batte "Pianeta Patate" su una query con entrambe).
+- **Boost temporale codex** (`src/db/codex.py`): query con
+  "ultimo/recente/prossim/destinazione/siamo/abbiamo" aggiungono le 3
+  voci codex più recenti per ID anche senza match testuale.
+- **Sticky-context multi-turn** (`src/llm.py`, classe `StickyContext`):
+  le voci di lore/codex matchate negli ultimi 2 turni restano nel
+  contesto, così il 3° turno non perde il filo quando usa pronomi
+  diversi dalle keyword originali.
+- **Esempi anti-allucinazione nel prompt** (`src/config.py`): istruzioni
+  concrete su cosa NON inventare (es. "se il lore dice 'stella Tuberalis'
+  NON inventare 'la nebulosa Tuberialis'").
 
 ## Sync codice PC → Pi
 SSH alias `artefatto` configurato in `~/.ssh/config`. Repo su Pi in `~/artefatto/`.
