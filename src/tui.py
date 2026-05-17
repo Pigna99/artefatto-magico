@@ -91,6 +91,7 @@ class ArtefattoApp(App):
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
         Binding("tab", "next_input_mode", "Modalità input", priority=True),
+        ("ctrl+l", "clear_chat", "Pulisci chat"),
         ("f5", "toggle_mute", "Mute TTS"),
         Binding("f8", "stop_tts", "Stop voce", priority=True),
         Binding("ctrl+x", "stop_tts", "Stop voce", priority=True),
@@ -127,7 +128,8 @@ class ArtefattoApp(App):
         yield Header(show_clock=True)
         yield Static(
             "[b]F1[/b] modello  [b]F2[/b] turbo  [b]TAB[/b] modalità  "
-            "[b]F5[/b] mute  [b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
+            "[b]F5[/b] mute  [b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+L[/b] clear  "
+            "[b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
             id="keys",
         )
         self.status = StatusPanel(id="status")
@@ -228,6 +230,14 @@ class ArtefattoApp(App):
     # ------------------------------------------------------------------
     # Keybindings
     # ------------------------------------------------------------------
+
+    def action_clear_chat(self):
+        """Pulisce solo la chat visibile (history LLM e DB restano intatti)."""
+        for child in list(self.chat.children):
+            child.remove()
+        self.chat.add_sys("chat pulita (storia LLM intatta)")
+        if self.fx:
+            self.fx.beep("short")
 
     def action_next_input_mode(self):
         if self.busy:
