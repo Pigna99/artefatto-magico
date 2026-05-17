@@ -23,31 +23,80 @@ DB_PATH = Path.home() / "artefatto" / "data" / "artefatto.db"
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "http://192.168.1.100:11434")
 MODEL = "qwen3:8b"
 
-# Query con risposta attesa (chiavi che DEVONO comparire nel reply)
+# Query con risposta attesa (chiavi che DEVONO comparire nel reply).
+# 30 query divise in 4 categorie:
+#   A) codex-first temporali (8): chi siamo, dove, prossimo, ultimo, ecc.
+#   B) codex-first specifiche (8): dettagli del viaggio
+#   C) lore puro (10): pianeti, divinità, cosmologia, politica
+#   D) miste / edge (4): unione codex+lore o domande generiche
 QUERIES = [
-    # Domande temporali/codex-first → memoria narrativa dovrebbe prevalere
+    # ---------- A) Codex-first temporali ----------
     {"q": "Dove siamo atterrati di recente?",
      "must_have": ["Cipolla"], "must_not_have": []},
-    {"q": "Chi è il Sindaco-Bulbo e cosa ci ha chiesto?",
-     "must_have": ["Sindaco-Bulbo", "semi"], "must_not_have": []},
-    {"q": "Chi sono i ladri dei semi sacri?",
-     "must_have": ["Galleggianti"], "must_not_have": []},
-    {"q": "Chi è il colpevole dietro al furto?",
-     "must_have": ["Carlo", "Bulbus"], "must_not_have": []},
     {"q": "Qual è la nostra prossima destinazione?",
      "must_have": ["Aglio"], "must_not_have": []},
+    {"q": "Da dove siamo partiti per questo viaggio?",
+     "must_have": ["Mestolo"], "must_not_have": []},
+    {"q": "Cosa è successo durante l'ultima sessione?",
+     "must_have": ["Aglio"], "must_not_have": []},
+    {"q": "Dove ci troviamo ora, maestro?",
+     "must_have": ["Cipolla"], "must_not_have": []},
+    {"q": "Cosa abbiamo fatto al villaggio di Lacrimopoli?",
+     "must_have": ["semi"], "must_not_have": []},
+    {"q": "Quanto è durato il viaggio per raggiungere Cipolla?",
+     "must_have": ["tre"], "must_not_have": []},
+    {"q": "Cosa abbiamo trovato nel granaio sud?",
+     "must_have": ["pozza"], "must_not_have": []},
 
-    # Domande di lore puro → deve usare il lore
+    # ---------- B) Codex-first specifiche ----------
+    {"q": "Chi è il Sindaco-Bulbo e cosa ci ha chiesto?",
+     "must_have": ["Sindaco-Bulbo", "semi"], "must_not_have": []},
+    {"q": "Chi è il colpevole dietro al furto dei semi?",
+     "must_have": ["Carlo"], "must_not_have": []},
+    {"q": "Cosa stava facendo Carlo Bulbus nella stalla?",
+     "must_have": ["rituale"], "must_not_have": []},
+    {"q": "A quale divinità Carlo Bulbus rivolgeva il suo rituale?",
+     "must_have": ["Notturna"], "must_not_have": []},
+    {"q": "Chi ha interrotto il rituale di Carlo Bulbus?",
+     "must_have": ["artefatto"], "must_not_have": []},
+    {"q": "Cosa ci ha donato il villaggio di Lacrimopoli come ringraziamento?",
+     "must_have": ["collana"], "must_not_have": []},
+    {"q": "Quanti ampolle di olio sacro porto con me?",
+     "must_have": ["due"], "must_not_have": []},
+    {"q": "Cosa abbiamo trovato nello scrigno di Carlo Bulbus?",
+     "must_have": ["mappa"], "must_not_have": []},
+
+    # ---------- C) Lore puro ----------
     {"q": "Cos'è la Confederazione delle Verdure?",
      "must_have": ["Carota"], "must_not_have": []},
     {"q": "Chi è Solarium il Germogliante?",
      "must_have": ["crescita"], "must_not_have": []},
     {"q": "Quali sono le Sette Spirali?",
      "must_have": ["Custode"], "must_not_have": []},
+    {"q": "Chi sono i Tre Cuochi Eterni?",
+     "must_have": ["Sale"], "must_not_have": []},
+    {"q": "Descrivimi il Pianeta Sedano",
+     "must_have": ["deserto"], "must_not_have": []},
+    {"q": "Chi vive sul Pianeta Carota?",
+     "must_have": ["Conigli"], "must_not_have": []},
+    {"q": "Cos'è il Pianeta Aglio?",
+     "must_have": ["morto"], "must_not_have": []},
+    {"q": "Cosa fu la Grande Bollitura?",
+     "must_have": ["Tuberalis"], "must_not_have": []},
+    {"q": "Cos'è il Mestolo d'Oro?",
+     "must_have": ["stazione"], "must_not_have": []},
+    {"q": "Chi è Notturna la Marcescente?",
+     "must_have": ["putrefazione"], "must_not_have": []},
 
-    # Domanda mista (richiede sia codex che lore)
+    # ---------- D) Miste / edge ----------
     {"q": "Cosa sappiamo di Carlo Bulbus e da dove viene?",
      "must_have": ["Aglio"], "must_not_have": []},
+    {"q": "Quale divinità è venerata dove ci troviamo ora?",
+     "must_have": ["Solarium"], "must_not_have": []},
+    {"q": "Esiste un legame tra il nostro prossimo viaggio e una divinità?",
+     "must_have": ["Notturna"], "must_not_have": []},
+    {"q": "C'è un pianeta che non avevamo mai sentito nominare? Inventane uno per me",
+     "must_have": [], "must_not_have": ["Cipolla", "Patate", "Carota", "Sedano", "Aglio", "Zucchina"]},
 ]
 
 
