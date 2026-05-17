@@ -85,8 +85,24 @@ class CodexMixin:
         )
         return [CodexEntry(**dict(r)) for r in cur.fetchall()]
 
-    def codex_context_for(self, user_text: str, max_entries: int = 3) -> str:
+    def codex_context_for(self, user_text: str, max_entries: int = 5) -> str:
         matches = self.search_codex(user_text, limit=max_entries)
+        # Per domande temporali ("ultimo", "prossimo", "recente", "ora", "dopo",
+        # "destinazione") aggiungo anche le ultime N voci per ID, perché spesso
+        # la risposta sta nell'ultima sessione anche se la query non matcha le
+        # sue parole esatte.
+        tl = user_text.lower()
+        temporal = any(k in tl for k in (
+            "ultim", "recent", "prossim", "ora", "dopo",
+            "destinazion", "siamo", "abbiamo", "succederà",
+        ))
+        if temporal:
+            recent = self.all_codex(limit=3)
+            seen_ids = {m.id for m in matches}
+            for r in recent:
+                if r.id not in seen_ids:
+                    matches.append(r)
+                    seen_ids.add(r.id)
         if not matches:
             return ""
         lines = [m.to_context_line() for m in matches]

@@ -22,10 +22,10 @@ def build_messages_with_rag(history: list[dict], user_text: str, db) -> tuple[li
 
     codex_matches = db.search_codex(user_text)
     ctx_codex = db.codex_context_for(user_text)
-    # Se il codex ha matchato, riduciamo il numero di voci lore (da 5 a 2)
-    # così il segnale "memoria narrativa" non si diluisce in un mare di lore
-    # generale. Importante per modelli piccoli (<2B) che pesano per volume.
-    lore_limit = 2 if codex_matches else 5
+    # Se il codex ha matchato, riduciamo drasticamente il lore (a 1) così la
+    # memoria narrativa pesa di più e il modello non confonde i nomi del lore
+    # generale con quelli del viaggio attuale.
+    lore_limit = 1 if codex_matches else 5
     lore_matches = db.search_lore(user_text, limit=lore_limit)
     ctx_lore = db.lore_context_for(user_text, max_entries=lore_limit)
     # Mettiamo PRIMA il codex (memoria narrativa recente, prevale sul lore
