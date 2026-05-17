@@ -144,7 +144,7 @@ Ogni step è `(frequenza_Hz, durata_tono, pausa_dopo)`.
 - Nuovo pattern beep: aggiungi entry in `GpioFx.BEEP_PATTERNS` (`gpio_fx.py:228`)
 - Nuovo stato semantico: aggiungi metodo `def xxx(self): with self._lock: self._state = _State(...)` e chiamalo dalla TUI
 
-## Modalità input (F3)
+## Modalità input (TAB)
 
 Ciclo `LIBERA → CODEX → ROLL → LORE` con beep `chirp` e bordo input colorato.
 Quando NON sei in `libera`, qualunque testo digitato viene prefissato col comando della modalità:

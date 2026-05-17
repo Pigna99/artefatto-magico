@@ -90,7 +90,7 @@ class ArtefattoApp(App):
     BINDINGS = [
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
-        ("f3", "next_input_mode", "Modalità input"),
+        Binding("tab", "next_input_mode", "Modalità input", priority=True),
         ("f5", "toggle_mute", "Mute TTS"),
         Binding("f8", "stop_tts", "Stop voce", priority=True),
         Binding("ctrl+x", "stop_tts", "Stop voce", priority=True),
@@ -126,7 +126,7 @@ class ArtefattoApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(
-            "[b]F1[/b] modello  [b]F2[/b] turbo  [b]F3[/b] modalità  "
+            "[b]F1[/b] modello  [b]F2[/b] turbo  [b]TAB[/b] modalità  "
             "[b]F5[/b] mute  [b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
             id="keys",
         )
