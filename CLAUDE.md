@@ -35,11 +35,16 @@ Cicla 7 colori → pulse rosso → 7 pattern beep → stati idle/thinking/speaki
 - Default: `qwen3:0.6b` (più veloce e accurato di gemma3:1b in pratica).
 - `gemma3:270m` rimosso: produceva risposte vuote nei test.
 
-**Turbo (sul PC RX 6800):** `OLLAMA_TURBO_MODEL=aya-expanse:8b`
-- Vincitore del world-test v2: 28/30 a 2.3s (italiano nativo Cohere).
-- `gemma4:latest` ottiene 30/30 ma è 3-4× più lento (7-8s/risposta) — usalo
-  solo per scene dove serve massima fedeltà narrativa.
-- `qwen3:8b`, `qwen2.5:14b`, `granite3.1-dense:8b` ~26/30, alternative.
+**Turbo (sul PC RX 6800):** `OLLAMA_TURBO_MODEL=gemma4:latest`
+- Vincitore del world-test v2: 30/30 a 7-12s/risposta (lento ma rigoroso).
+- Verificato qualitativamente su 6 query "trappola" con dettagli sottili
+  (Solanum Magnum, lune Bollita/Arrosto/Lessa): aderisce al lore, non
+  inventa, parafrasa con eleganza.
+- `aya-expanse:8b` è 28/30 ma in pratica INVENTA quando il lore è breve
+  (mescola Cipolla con Patate, confonde Eclissi Olio con stagioni delle
+  lune). Veloce (2.3s) ma poco affidabile.
+- `qwen3:8b`, `qwen2.5:14b`, `granite3.1-dense:8b` ~26/30, alternative
+  intermedie per quando serve risposta rapida.
 
 ## File di config locale sul Pi
 `~/.config/artefatto/env` (NON in git):

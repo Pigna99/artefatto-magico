@@ -23,7 +23,7 @@ LOCAL_MODELS = ["qwen3:0.6b", "gemma3:1b"]
 DEFAULT_MODEL = os.environ.get("ARTEFATTO_MODEL", LOCAL_MODELS[0])
 
 TURBO_URL = os.environ.get("OLLAMA_TURBO_URL", "")
-TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "aya-expanse:8b")
+TURBO_MODEL = os.environ.get("OLLAMA_TURBO_MODEL", "gemma4:latest")
 TURBO_MODELS_ENV = os.environ.get("OLLAMA_TURBO_MODELS", "")
 
 # Edge-TTS (cloud Microsoft, free) per modalità turbo.
