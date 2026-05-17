@@ -91,6 +91,9 @@ class CodexMixin:
             return ""
         lines = [m.to_context_line() for m in matches]
         return (
-            "\n\nMEMORIA NARRATIVA (resoconti di sessione passati):\n"
+            "\n\nMEMORIA NARRATIVA (eventi realmente accaduti nelle "
+            "sessioni passate; sono la VERITÀ vissuta da Pigna e prevalgono "
+            "sul lore generale quando la domanda è 'cosa è successo', "
+            "'ultimo', 'recente', 'dove siamo stati'):\n"
             + "\n".join(lines)
         )

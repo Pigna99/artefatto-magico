@@ -24,7 +24,10 @@ def build_messages_with_rag(history: list[dict], user_text: str, db) -> tuple[li
     codex_matches = db.search_codex(user_text)
     ctx_lore = db.lore_context_for(user_text)
     ctx_codex = db.codex_context_for(user_text)
-    ctx = ctx_lore + ctx_codex
+    # Mettiamo PRIMA il codex (memoria narrativa recente, prevale sul lore
+    # quando la domanda è temporale tipo "ultimo", "recente", "ieri"...)
+    # e DOPO il lore generale. I modelli pesano di più ciò che vedono prima.
+    ctx = ctx_codex + ctx_lore
 
     if ctx:
         messages = (
