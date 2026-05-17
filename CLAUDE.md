@@ -35,9 +35,11 @@ Cicla 7 colori → pulse rosso → 7 pattern beep → stati idle/thinking/speaki
 - Default: `qwen3:0.6b` (più veloce e accurato di gemma3:1b in pratica).
 - `gemma3:270m` rimosso: produceva risposte vuote nei test.
 
-**Turbo (sul PC RX 6800):** `OLLAMA_TURBO_MODEL=qwen3:8b`
-- Vincitore del full-test: 1.7s/risposta, 42 tps, zero allucinazioni.
-- Alternative valide: `mistral-nemo:12b`, `gemma3:12b`.
+**Turbo (sul PC RX 6800):** `OLLAMA_TURBO_MODEL=aya-expanse:8b`
+- Vincitore del world-test v2: 28/30 a 2.3s (italiano nativo Cohere).
+- `gemma4:latest` ottiene 30/30 ma è 3-4× più lento (7-8s/risposta) — usalo
+  solo per scene dove serve massima fedeltà narrativa.
+- `qwen3:8b`, `qwen2.5:14b`, `granite3.1-dense:8b` ~26/30, alternative.
 
 ## File di config locale sul Pi
 `~/.config/artefatto/env` (NON in git):
