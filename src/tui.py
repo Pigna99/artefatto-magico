@@ -66,17 +66,31 @@ except Exception:  # noqa: BLE001
         return text
 
 
+INPUT_MODES = [
+    # (key, title, border_color, placeholder)
+    ("libera", "LIBERA",  "$success", "Scrivi qui... (Invio per inviare)"),
+    ("codex",  "CODEX",   "$warning", "Codex: <titolo> <testo>  (aggiunge una voce di codex)"),
+    ("roll",   "ROLL",    "$accent",  "Roll: d20 oppure 2d6  (tira dadi)"),
+    ("lore",   "LORE",    "magenta",  "Lore: <kind> <nome> <descrizione>  (kind: npc/place/item/event/note)"),
+]
+
+
 class ArtefattoApp(App):
     CSS = """
     Screen { layout: vertical; }
     #keys { height: 1; padding: 0 1; background: $accent 20%; color: $text; }
     #chat { height: 1fr; }
-    Input { dock: bottom; }
+    Input { dock: bottom; border: tall $success; }
+    Input.mode-libera { border: tall $success; }
+    Input.mode-codex  { border: tall $warning; }
+    Input.mode-roll   { border: tall $accent; }
+    Input.mode-lore   { border: tall magenta; }
     """
 
     BINDINGS = [
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
+        ("f3", "next_input_mode", "Modalità input"),
         ("f5", "toggle_mute", "Mute TTS"),
         Binding("f8", "stop_tts", "Stop voce", priority=True),
         Binding("ctrl+x", "stop_tts", "Stop voce", priority=True),
@@ -87,6 +101,7 @@ class ArtefattoApp(App):
 
     busy = reactive(False)
     muted = reactive(False)
+    input_mode_idx = reactive(0)
 
     def __init__(self):
         super().__init__()
@@ -111,8 +126,8 @@ class ArtefattoApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(
-            "[b]F1[/b] modello  [b]F2[/b] turbo  [b]F5[/b] mute  "
-            "[b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
+            "[b]F1[/b] modello  [b]F2[/b] turbo  [b]F3[/b] modalità  "
+            "[b]F5[/b] mute  [b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
             id="keys",
         )
         self.status = StatusPanel(id="status")
@@ -201,12 +216,35 @@ class ArtefattoApp(App):
         if busy:
             self.input.placeholder = f"⏳ {msg}" if msg else "⏳ in elaborazione…"
         else:
-            self.input.placeholder = "Scrivi qui... (Invio per inviare)"
+            _, title, _, placeholder = INPUT_MODES[self.input_mode_idx]
+            self.input.placeholder = f"[{title}] {placeholder}"
             self.call_after_refresh(self.input.focus)
 
     # ------------------------------------------------------------------
     # Keybindings
     # ------------------------------------------------------------------
+
+    def action_next_input_mode(self):
+        if self.busy:
+            return
+        self.input_mode_idx = (self.input_mode_idx + 1) % len(INPUT_MODES)
+        if self.fx:
+            self.fx.beep("chirp")
+            _, _, _, _ = INPUT_MODES[self.input_mode_idx]
+
+    def watch_input_mode_idx(self, idx: int):
+        if not hasattr(self, "input"):
+            return
+        key, title, _color, placeholder = INPUT_MODES[idx]
+        # Aggiorna classi CSS (rimuovo le altre, aggiungo la corrente)
+        for k, _, _, _ in INPUT_MODES:
+            self.input.remove_class(f"mode-{k}")
+        self.input.add_class(f"mode-{key}")
+        # Placeholder dinamico
+        if not self.busy:
+            self.input.placeholder = f"[{title}] {placeholder}"
+        if hasattr(self, "chat"):
+            self.chat.add_sys(f"modalità input → {title}")
 
     def action_toggle_mute(self):
         self.muted = not self.muted
@@ -310,6 +348,17 @@ class ArtefattoApp(App):
             return
         self.input.push_history(text)
         self.input.value = ""
+
+        # Modalità input: se non sei in "libera" e non hai scritto uno slash
+        # esplicito, traduco l'input nel comando della modalità corrente.
+        mode_key = INPUT_MODES[self.input_mode_idx][0]
+        if mode_key != "libera" and not text.startswith("/"):
+            prefix_map = {
+                "codex": "/codex add ",
+                "roll":  "/roll ",
+                "lore":  "/lore add ",
+            }
+            text = prefix_map[mode_key] + text
 
         if text.startswith("/"):
             self.chat.add_user(text)

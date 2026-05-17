@@ -144,6 +144,20 @@ Ogni step è `(frequenza_Hz, durata_tono, pausa_dopo)`.
 - Nuovo pattern beep: aggiungi entry in `GpioFx.BEEP_PATTERNS` (`gpio_fx.py:228`)
 - Nuovo stato semantico: aggiungi metodo `def xxx(self): with self._lock: self._state = _State(...)` e chiamalo dalla TUI
 
+## Modalità input (F3)
+
+Ciclo `LIBERA → CODEX → ROLL → LORE` con beep `chirp` e bordo input colorato.
+Quando NON sei in `libera`, qualunque testo digitato viene prefissato col comando della modalità:
+
+| Modalità | Bordo | Prefisso aggiunto | Esempio scrittura → eseguito |
+|---|---|---|---|
+| libera | verde | nessuno | `chi è Re Patatone?` → LLM |
+| codex | giallo | `/codex add ` | `Sessione 4 testo...` → `/codex add Sessione 4 testo...` |
+| roll | accent | `/roll ` | `d20` → `/roll d20` |
+| lore | magenta | `/lore add ` | `npc Eldrin un fratello caduto` → `/lore add npc Eldrin un fratello caduto` |
+
+Un input che inizia con `/` bypassa sempre la modalità (resta interpretato come comando esplicito). Definito in [src/tui.py](src/tui.py) via `INPUT_MODES`.
+
 ## Struttura del codice (post-refactor 2026-05-17)
 
 ```
