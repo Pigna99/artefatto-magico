@@ -74,6 +74,23 @@ class SyncClient:
             except Exception:
                 pass
 
+    def status(self) -> str:
+        """Stringa breve per la status bar: ws|http|off + coda pendente."""
+        pending = 0
+        try:
+            if QUEUE_PATH.exists():
+                with QUEUE_PATH.open("r", encoding="utf-8") as f:
+                    pending = sum(1 for line in f if line.strip())
+        except Exception:
+            pass
+        connected = (
+            self._ws is not None and getattr(self._ws, "sock", None) is not None
+        )
+        base = "ws✓" if connected else "http"
+        if pending:
+            return f"sync: {base} (q={pending})"
+        return f"sync: {base}"
+
     def push(self, table: str, op: str, payload: dict):
         """Callback per `db.on_write`. Emette via WS se connesso, altrimenti
         accoda. Non solleva mai: una write locale deve sempre andare a
@@ -182,6 +199,17 @@ class SyncClient:
     # WebSocket (opzionale, richiede websocket-client)
     # ------------------------------------------------------------------
     def _maybe_connect_ws(self):
+        # Il sito usa Socket.io, non WebSocket puro: servirebbe python-socketio
+        # come client. Per ora ci limitiamo al polling HTTP (sufficiente per
+        # uso single-user). Se python-socketio è installato, in futuro
+        # potremmo collegare il client qui.
+        try:
+            import socketio  # type: ignore  # noqa: F401
+        except Exception:
+            return
+        # TODO: implementare client socketio quando serve push real-time
+        return
+        # Codice legacy non eseguito ma tenuto come riferimento:
         try:
             import websocket  # type: ignore
         except Exception:

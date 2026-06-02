@@ -51,7 +51,7 @@ class StatusPanel(Horizontal):
     """Pannello in cima: barre CPU/RAM/TEMP + modello/host/ultimo turno."""
 
     DEFAULT_CSS = """
-    StatusPanel { height: 9; padding: 0 1; border: round $primary; }
+    StatusPanel { height: 10; padding: 0 1; border: round $primary; }
     StatusPanel > .col { width: 1fr; padding: 0 1; }
     StatusPanel Static.title { color: $accent; text-style: bold; height: 1; }
     StatusPanel Label { color: $text-muted; }
@@ -63,6 +63,7 @@ class StatusPanel(Horizontal):
     model = reactive("--")
     host_label = reactive("locale (Pi)")
     last_ttok = reactive("--")
+    sync_label = reactive("sync: off")
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="col"):
@@ -78,9 +79,11 @@ class StatusPanel(Horizontal):
             self.model_lbl = Label(self.model, id="model_lbl")
             self.host_lbl = Label(self.host_label, id="host_lbl")
             self.ttok_lbl = Label(self.last_ttok, id="ttok_lbl")
+            self.sync_lbl = Label(self.sync_label, id="sync_lbl")
             yield self.model_lbl
             yield self.host_lbl
             yield self.ttok_lbl
+            yield self.sync_lbl
 
     def watch_model(self, value: str):
         if hasattr(self, "model_lbl"):
@@ -93,6 +96,10 @@ class StatusPanel(Horizontal):
     def watch_last_ttok(self, value: str):
         if hasattr(self, "ttok_lbl"):
             self.ttok_lbl.update(f"ultima:  {value}")
+
+    def watch_sync_label(self, value: str):
+        if hasattr(self, "sync_lbl"):
+            self.sync_lbl.update(value)
 
 
 class HistoryInput(Input):
@@ -127,6 +134,12 @@ class HistoryInput(Input):
             self.value = self.value[:pos] + "\n" + self.value[pos:]
             self.cursor_position = pos + 1
             event.stop()
+            return
+        # Ctrl+E → apri editor esterno. Textual Input ha ctrl+e nativo
+        # ("end-of-line"), lo ridirezioniamo all'action dell'app.
+        if event.key == "ctrl+e":
+            event.stop()
+            await self.app.action_external_editor()
             return
         if event.key == "up":
             if self.h_index == 0:

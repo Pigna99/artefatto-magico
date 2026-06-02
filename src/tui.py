@@ -69,11 +69,13 @@ except Exception:  # noqa: BLE001
 
 INPUT_MODES = [
     # (key, title, border_color, placeholder)
-    ("libera", "LIBERA",  "$success", "Scrivi qui... (Invio per inviare)"),
-    ("codex",  "CODEX",   "$warning", "Codex: <titolo> <testo>  (aggiunge una voce di codex)"),
-    ("roll",   "ROLL",    "$accent",  "Roll: d20 oppure 2d6  (tira dadi)"),
-    ("lore",   "LORE",    "magenta",  "Lore: <kind> <nome> <descrizione>  (kind: npc/place/item/event/note)"),
+    ("libera", "LIBERA", "$success", "Scrivi qui... (Invio per inviare)"),
+    ("codex",  "CODEX",  "$warning", "Titolo voce codex (Invio → editor per il testo)"),
+    ("roll",   "ROLL",   "$accent",  "Roll: d20 oppure 2d6  (tira dadi)"),
 ]
+# La modalità LORE è stata rimossa dal bot: le voci di lore si gestiscono
+# direttamente dal sito campagna.pignalabs.it. Il bot serve solo per la
+# narrazione live a tavolo e per i resoconti rapidi (codex).
 
 
 class ArtefattoApp(App):
@@ -85,7 +87,6 @@ class ArtefattoApp(App):
     Input.mode-libera { border: tall $success; }
     Input.mode-codex  { border: tall $warning; }
     Input.mode-roll   { border: tall $accent; }
-    Input.mode-lore   { border: tall magenta; }
     """
 
     BINDINGS = [
@@ -159,9 +160,9 @@ class ArtefattoApp(App):
             self.fx.turbo(self.use_turbo)
         await asyncio.to_thread(self._init_engines)
         # Auto-switch a turbo all'avvio (configurabile via ARTEFATTO_START_TURBO).
-        # Non logghiamo session.start finché non abbiamo il modello definitivo.
+        # force=True perché siamo dentro on_mount con busy=True (risveglio).
         if START_TURBO and TURBO_URL and not self.use_turbo:
-            self.action_toggle_turbo()
+            self.action_toggle_turbo(force=True)
         if self.db:
             self.session_id = self.db.start_session(
                 model=self.current_model, turbo=self.use_turbo,
@@ -225,6 +226,12 @@ class ArtefattoApp(App):
             self.status.temp_bar.update_value(temp_pct, suffix=f"{temp_c:.0f}°C")
         except Exception:
             pass
+        # Stato sync
+        try:
+            sync = getattr(self, "sync", None)
+            self.status.sync_label = sync.status() if sync else "sync: off"
+        except Exception:
+            self.status.sync_label = "sync: err"
 
     @staticmethod
     def _read_temp() -> float:
@@ -277,7 +284,9 @@ class ArtefattoApp(App):
         applica poi il suo prefisso normalmente al submit.
         """
         if self.busy:
+            log_event("editor.skip", reason="busy")
             return
+        log_event("editor.open", mode=INPUT_MODES[self.input_mode_idx][0])
         import os, tempfile, subprocess
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
         with tempfile.NamedTemporaryFile(
@@ -346,8 +355,8 @@ class ArtefattoApp(App):
             self.fx.beep("short")
             self.fx.flash("viola", 0.25)
 
-    def action_toggle_turbo(self):
-        if self.busy:
+    def action_toggle_turbo(self, *, force: bool = False):
+        if self.busy and not force:
             return
         if not TURBO_URL:
             self.chat.add_sys("turbo non configurato (manca OLLAMA_TURBO_URL)")
@@ -433,16 +442,16 @@ class ArtefattoApp(App):
         self.input.push_history(text)
         self.input.value = ""
 
-        # Modalità input: se non sei in "libera" e non hai scritto uno slash
-        # esplicito, traduco l'input nel comando della modalità corrente.
         mode_key = INPUT_MODES[self.input_mode_idx][0]
-        if mode_key != "libera" and not text.startswith("/"):
-            prefix_map = {
-                "codex": "/codex add ",
-                "roll":  "/roll ",
-                "lore":  "/lore add ",
-            }
-            text = prefix_map[mode_key] + text
+
+        # CODEX: il testo digitato è il TITOLO; apro l'editor per il body.
+        if mode_key == "codex" and not text.startswith("/"):
+            await self._codex_two_step(title=text)
+            return
+
+        # ROLL: prefisso /roll.
+        if mode_key == "roll" and not text.startswith("/"):
+            text = "/roll " + text
 
         if text.startswith("/"):
             self.chat.add_user(text)
@@ -457,6 +466,60 @@ class ArtefattoApp(App):
         self.set_busy(False)
         if sentences and not self.muted:
             asyncio.create_task(self._speak_phase(sentences, full_text))
+
+    async def _codex_two_step(self, *, title: str):
+        """Flow CODEX a due step: titolo inline → editor esterno per il body
+        → salva nel DB. Non passa dal LLM, non genera risposta vocale."""
+        if not self.db:
+            self.chat.add_sys("DB non disponibile, codex saltato")
+            return
+        import os, tempfile, subprocess
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=f"_codex_{title[:30].replace(' ', '_')}.md",
+            delete=False, encoding="utf-8",
+        ) as f:
+            f.write(
+                f"# {title}\n\n"
+                "<!-- Scrivi qui il resoconto. Salva e chiudi per registrare. "
+                "Lascia il file vuoto per annullare. -->\n\n"
+            )
+            tmp_path = f.name
+        log_event("codex.editor.open", title=title[:60])
+        try:
+            with self.suspend():
+                subprocess.run([editor, tmp_path], check=False)
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        # Rimuovo il commento HTML guida + righe vuote di testa
+        body_lines = []
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("<!--") and stripped.endswith("-->"):
+                continue
+            body_lines.append(line)
+        body = "\n".join(body_lines).strip()
+        # Rimuovo l'header markdown "# titolo" se l'utente non l'ha tolto
+        if body.startswith("# "):
+            body = "\n".join(body.split("\n", 1)[1:]).strip()
+        if not body:
+            self.chat.add_sys(f"codex «{title}» annullato (vuoto)")
+            log_event("codex.cancel", title=title[:60])
+            return
+        try:
+            self.db.add_codex(title=title, body=body)
+            self.chat.add_sys(f"Codex: {title}")
+            log_event("codex.saved", title=title[:60], chars=len(body))
+            if self.fx:
+                self.fx.beep("ack")
+        except Exception as e:
+            self.chat.add_sys(f"errore salvataggio codex: {e}")
+            log_event("codex.error", err=repr(e))
 
     async def _llm_phase(self, user_text: str) -> tuple[list[str], str]:
         if self.fx:
