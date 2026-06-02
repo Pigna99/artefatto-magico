@@ -7,7 +7,7 @@ Schema v2: aggiunte colonne per il sync col sito campagna.pignalabs.it.
 - origin: 'pi' o 'site' — tracciamento dove la voce è nata.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -84,6 +84,22 @@ CREATE TABLE IF NOT EXISTS lore_tags (
     PRIMARY KEY (lore_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_lore_tags_tag ON lore_tags(tag);
+
+-- Sezioni multi-permesso (schema v4). Mirror di lore_sections sul sito.
+-- Il Pi riceve solo le sezioni a cui ha accesso (gia' filtrate lato
+-- server). Quelle 'pi_only' arrivano col body sostituito da SEALED_MARKER.
+-- Il RAG concatena tutte le sezioni in `lore.description` legacy (per
+-- restare compatibile con i prompt esistenti).
+CREATE TABLE IF NOT EXISTS lore_sections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    lore_id     INTEGER NOT NULL REFERENCES lore(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    title       TEXT,
+    body        TEXT NOT NULL DEFAULT '',
+    visibility  TEXT NOT NULL DEFAULT 'all'
+);
+CREATE INDEX IF NOT EXISTS idx_lore_sections_lore
+    ON lore_sections(lore_id, position);
 
 CREATE TABLE IF NOT EXISTS codex (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

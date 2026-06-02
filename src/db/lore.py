@@ -64,9 +64,14 @@ class LoreMixin:
     def merge_lore_from_remote(self, payload: dict) -> str:
         """Applica un cambio di lore proveniente dal sito.
 
+        Nuovo schema (v4): payload include `sections: list[dict]` con campi
+        `position, title, body, visibility`. La `description` legacy della
+        colonna `lore` viene derivata concatenando i body delle sezioni
+        (per restare compatibili col RAG che cita `description`).
+
         payload obbligatorio: name, kind, updated_at.
-        Opzionali: description, tags (list[str] o stringa CSV legacy),
-        secret, sealed, visibility, remote_id, deleted_at.
+        Opzionali: sections, description (legacy), tags (list[str] o CSV
+        legacy), remote_id, deleted_at, origin.
 
         Ritorna 'inserted' | 'updated' | 'deleted' | 'skipped'.
         """
@@ -89,14 +94,31 @@ class LoreMixin:
                     self._conn.commit()
                     return "deleted"
                 return "skipped"
-            # Server-wins: applico sempre quando il record non esiste oppure
-            # quando il remote_ts è >= locale.
+            # Server-wins
             if row and row["updated_at"] and remote_ts < row["updated_at"]:
                 return "skipped"
-            description = payload.get("description", "")
-            # tags puo' arrivare come list[str] (nuovo formato) o stringa CSV
-            # (legacy). Normalizzo a CSV per la colonna `tags` (usata da FTS5)
-            # e a list per la tabella lore_tags.
+
+            # Sezioni: nuovo formato. Compat: se manca, finge una sezione
+            # 'all' con description legacy.
+            sections = payload.get("sections")
+            if not isinstance(sections, list):
+                desc_legacy = payload.get("description", "")
+                sections = [
+                    {"position": 0, "title": None, "body": desc_legacy, "visibility": "all"}
+                ]
+
+            # Derivo la description legacy concatenando i body (con titoli).
+            chunks = []
+            for s in sections:
+                title = s.get("title")
+                body = s.get("body", "") or ""
+                if title:
+                    chunks.append(f"## {title}\n{body}")
+                else:
+                    chunks.append(body)
+            description_legacy = "\n\n".join(chunks).strip()
+
+            # Tag
             raw_tags = payload.get("tags")
             tag_list: list[str] = []
             if isinstance(raw_tags, list):
@@ -104,8 +126,16 @@ class LoreMixin:
             elif isinstance(raw_tags, str) and raw_tags.strip():
                 tag_list = [t.strip().lower() for t in raw_tags.split(",") if t.strip()]
             tags_csv = ", ".join(tag_list) if tag_list else None
-            secret = 1 if payload.get("secret") else 0
-            sealed = 1 if payload.get("sealed") else 0
+
+            # sealed = ha sezioni pi_only (l'LLM allude). secret = ha sezioni
+            # gm_only o pi_only (in pratica: c'e' contenuto "non-pubblico").
+            has_pi_only = any(s.get("visibility") == "pi_only" for s in sections)
+            has_secret = any(
+                s.get("visibility") in ("gm_only", "pi_only") for s in sections
+            )
+            sealed = 1 if has_pi_only else 0
+            secret = 1 if has_secret else 0
+
             remote_id = payload.get("remote_id")
             origin = payload.get("origin", "site")
             now = self._now()
@@ -116,20 +146,36 @@ class LoreMixin:
                 "VALUES (?, ?, ?, ?, "
                 "  COALESCE((SELECT created_at FROM lore WHERE name=? AND kind=?), ?), "
                 "  ?, ?, ?, NULL, ?, ?)",
-                (name, kind, description, tags_csv,
+                (name, kind, description_legacy, tags_csv,
                  name, kind, now, remote_ts, secret, sealed, origin, remote_id),
             )
-            # Replace tag list in lore_tags
             lore_row = self._conn.execute(
                 "SELECT id FROM lore WHERE name=? AND kind=?", (name, kind),
             ).fetchone()
             if lore_row is not None:
                 lore_id = lore_row["id"]
+                # Replace tags
                 self._conn.execute("DELETE FROM lore_tags WHERE lore_id=?", (lore_id,))
                 for tag in set(tag_list):
                     self._conn.execute(
                         "INSERT OR IGNORE INTO lore_tags(lore_id, tag) VALUES (?, ?)",
                         (lore_id, tag),
+                    )
+                # Replace sezioni
+                self._conn.execute(
+                    "DELETE FROM lore_sections WHERE lore_id=?", (lore_id,)
+                )
+                for i, s in enumerate(sections):
+                    self._conn.execute(
+                        "INSERT INTO lore_sections(lore_id, position, title, body, visibility) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            lore_id,
+                            int(s.get("position", i)),
+                            s.get("title"),
+                            s.get("body", "") or "",
+                            s.get("visibility", "all"),
+                        ),
                     )
             self._conn.commit()
             return "updated" if row else "inserted"
