@@ -80,6 +80,48 @@ class Database(SessionsMixin, LoreMixin, CodexMixin, GmConfigMixin):
                 if not has_col(table, col):
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
+        # v5: rilasciamo il vecchio CHECK su lore.kind (limitato a
+        # 'npc/pg/place/item/event/note') per accettare i nuovi kind
+        # 'faction' / 'knowledge' propagati dal sito.
+        # SQLite non supporta DROP CONSTRAINT, quindi sondiamo prima
+        # se il CHECK c'e' tentando l'INSERT di un kind ignoto in
+        # rollback. Se il vincolo blocca, rebuilda la tabella senza CHECK.
+        if from_version < 5:
+            try:
+                self._conn.execute("SAVEPOINT _check_probe")
+                self._conn.execute(
+                    "INSERT INTO lore(name,kind,description,created_at,updated_at) "
+                    "VALUES ('__probe__','faction','',?,?)",
+                    (self._now(), self._now()),
+                )
+                self._conn.execute("ROLLBACK TO _check_probe")
+                self._conn.execute("RELEASE _check_probe")
+            except Exception:
+                self._conn.execute("ROLLBACK TO _check_probe")
+                self._conn.execute("RELEASE _check_probe")
+                # Rebuild: copia in tabella temp senza CHECK e rinomina.
+                self._conn.executescript(
+                    "CREATE TABLE lore_new ("
+                    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "  name TEXT NOT NULL,"
+                    "  kind TEXT NOT NULL,"
+                    "  description TEXT NOT NULL,"
+                    "  tags TEXT,"
+                    "  created_at TEXT NOT NULL,"
+                    "  updated_at TEXT NOT NULL,"
+                    "  secret INTEGER NOT NULL DEFAULT 0,"
+                    "  sealed INTEGER NOT NULL DEFAULT 0,"
+                    "  deleted_at TEXT,"
+                    "  origin TEXT NOT NULL DEFAULT 'pi',"
+                    "  remote_id TEXT,"
+                    "  UNIQUE(name, kind)"
+                    ");"
+                    "INSERT INTO lore_new SELECT id,name,kind,description,tags,"
+                    "created_at,updated_at,secret,sealed,deleted_at,origin,remote_id FROM lore;"
+                    "DROP TABLE lore;"
+                    "ALTER TABLE lore_new RENAME TO lore;"
+                )
+
     @staticmethod
     def _now() -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S")

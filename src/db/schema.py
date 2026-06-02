@@ -7,7 +7,7 @@ Schema v2: aggiunte colonne per il sync col sito campagna.pignalabs.it.
 - origin: 'pi' o 'site' — tracciamento dove la voce è nata.
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -39,7 +39,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_role    ON messages(role);
 CREATE TABLE IF NOT EXISTS lore (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('npc','pg','place','item','event','note')),
+    kind        TEXT NOT NULL,  -- enum gestito server-side (sito Postgres),
+                                 -- qui rilassato per accettare nuovi kind senza migrate
+                                 -- (faction, knowledge, ecc.).
     description TEXT NOT NULL,
     tags        TEXT,
     created_at  TEXT NOT NULL,
