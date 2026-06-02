@@ -191,9 +191,17 @@ class ArtefattoApp(App):
             self.sync = _sync_attach(self.db) if self.db else None
             if self.sync is not None:
                 self.sync.set_command_handler(self._on_master_command)
+                self.sync.set_debug_callback(self._on_sync_debug)
         except Exception as e:
             log_event("sync.attach_fail", err=repr(e))
             self.sync = None
+
+    def _on_sync_debug(self, msg: str):
+        """Notifica visiva da thread WS → UI Textual. Thread-safe."""
+        try:
+            self.call_from_thread(self.chat.add_sys, msg)
+        except Exception:
+            pass
 
     def _on_master_command(self, event: str, payload: dict):
         """Comando real-time dal sito Master Console. Gira nel thread del
@@ -226,7 +234,7 @@ class ArtefattoApp(App):
             elif event == "stop_tts":
                 self.call_from_thread(self.action_stop_tts)
         except Exception as e:
-            log_event("master.cmd.err", event=event, err=repr(e))
+            log_event("master.cmd.err", evt=event, err=repr(e))
 
     def _master_speak(self, text: str):
         """Dispara TTS per il messaggio del Master come fosse una visione."""

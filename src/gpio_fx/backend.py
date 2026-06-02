@@ -59,11 +59,20 @@ class _RealBackend:
         if self.buzz_tonal is not None:
             try:
                 from gpiozero.tones import Tone  # type: ignore
-                self.buzz_tonal.play(Tone(int(freq_hz)))
+                # TonalBuzzer ha range limitato (220-880Hz tipico).
+                # Clamp invece di sollevare per evitare silenzi su
+                # pattern come 'chirp' che usano 1200-1500Hz.
+                clamped = max(220.0, min(880.0, float(freq_hz)))
+                self.buzz_tonal.play(Tone(int(clamped)))
                 time.sleep(duration_s)
                 self.buzz_tonal.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    from config import log_event
+                    log_event("gpio.tone.err", freq=int(freq_hz),
+                              err=repr(e)[:120])
+                except Exception:
+                    pass
         elif self.buzz_active is not None:
             self.buzz_active.on()
             time.sleep(duration_s)

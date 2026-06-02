@@ -53,6 +53,7 @@ class SyncClient:
         self._ws = None
         self._ws_thread: Optional[threading.Thread] = None
         self._cmd_handler = None
+        self._debug_cb = None  # callback(string) per notifiche UI
         QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -114,6 +115,12 @@ class SyncClient:
         Eseguita nel thread del client socketio (non bloccare).
         """
         self._cmd_handler = handler
+
+    def set_debug_callback(self, cb):
+        """Callback opzionale `cb(msg: str)` per messaggi diagnostici WS
+        da visualizzare in TUI (es. eventi ricevuti). Thread-safe richiesta
+        al chiamante (usa call_from_thread se serve toccare la UI)."""
+        self._debug_cb = cb
 
     # ------------------------------------------------------------------
     # Main loop
@@ -243,36 +250,42 @@ class SyncClient:
     # ------------------------------------------------------------------
     def _maybe_connect_ws(self):
         if self._is_ws_connected():
+            log_event("sync.ws.skip", reason="already_connected")
             return
         try:
             import socketio  # type: ignore
-        except Exception:
+        except Exception as e:
+            log_event("sync.ws.skip", reason="no_socketio", err=repr(e))
             return
 
-        # Auth via querystring/auth: il middleware lato server controlla
-        # `socket.handshake.auth.token` o l'header `X-Pi-Key`.
+        log_event("sync.ws.creating", lib_ver=getattr(socketio, "__version__", "?"))
+
         sio = socketio.Client(
             reconnection=True,
-            reconnection_attempts=0,  # 0 = infinite
+            reconnection_attempts=0,
             reconnection_delay=2,
             reconnection_delay_max=30,
+            logger=False,
+            engineio_logger=False,
         )
 
-        @sio.event
-        def connect():
-            log_event("sync.ws.open")
+        def _on_connect():
+            log_event("sync.ws.open", sid=str(getattr(sio, "sid", "?"))[:20])
+            if self._debug_cb:
+                try:
+                    self._debug_cb("WS connesso al sito")
+                except Exception:
+                    pass
             try:
                 self._flush_queue()
             except Exception as e:
                 log_event("sync.ws.flush_err", err=repr(e))
 
-        @sio.event
-        def disconnect():
-            log_event("sync.ws.close")
+        def _on_disconnect(*args):
+            log_event("sync.ws.close", args=str(args)[:80])
 
-        @sio.on("change")
-        def on_change(data):
-            # Cambi su lore/codex pushati dal server (es. GM edita sul sito)
+        def _on_change(data):
+            log_event("sync.ws.recv", evt="change", data_type=type(data).__name__)
             if not isinstance(data, dict):
                 return
             table = data.get("table")
@@ -283,36 +296,43 @@ class SyncClient:
                 except Exception as e:
                     log_event("sync.ws.apply_err", err=repr(e))
 
-        @sio.on("master.command")
-        def on_master_command(data):
-            # Comando real-time dal Master (sito → Pi)
+        def _on_master_command(data):
             if not isinstance(data, dict):
                 return
-            event = str(data.get("event", "")).strip()
+            evt = str(data.get("event", "")).strip()
             payload = data.get("payload") or {}
-            log_event("sync.master.cmd", event=event)
+            log_event("sync.master.cmd", evt=evt,
+                      has_handler=bool(self._cmd_handler))
+            if self._debug_cb:
+                try:
+                    self._debug_cb(f"⇶ Master: {evt}")
+                except Exception as e:
+                    log_event("sync.dbg.cb_err", err=repr(e))
             if self._cmd_handler is None:
                 return
             try:
-                self._cmd_handler(event, payload)
+                self._cmd_handler(evt, payload)
+                log_event("sync.master.cmd_ok", evt=evt)
             except Exception as e:
                 log_event("sync.master.cmd_err", err=repr(e))
 
-        # Fallback per debug: cattura QUALSIASI evento per scoprire se il
-        # nome con il punto non viene riconosciuto.
-        @sio.on("*")
-        def catch_all(event_name, *args):
-            log_event("sync.ws.recv", evt=str(event_name)[:60])
-            if event_name == "master.command" and args:
-                on_master_command(args[0])
+        def _catch_all(*args):
+            log_event("sync.ws.catchall", args=str(args)[:120])
+
+        sio.on("connect", _on_connect)
+        sio.on("disconnect", _on_disconnect)
+        sio.on("change", _on_change)
+        sio.on("master.command", _on_master_command)
+        log_event("sync.ws.handlers_bound",
+                  events="connect,disconnect,change,master.command")
 
         def _run():
             try:
+                log_event("sync.ws.connecting", url=self.base, path="/ws/sync/")
                 sio.connect(
                     self.base,
                     socketio_path="/ws/sync/",
                     auth={"token": self.key},
-                    headers={"X-Pi-Key": self.key},
                     transports=["websocket"],
                     wait=True,
                     wait_timeout=10,
