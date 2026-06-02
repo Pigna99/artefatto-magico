@@ -94,7 +94,9 @@ PRESET_TURBO = {
         # Tremolo veloce + profondo: la vibrazione "ronzante" da robot.
         "tremolo", "42", "90",
         # Flanger: il caratteristico timbro metallico/sintetico (effetto "Cylon").
-        "flanger", "0", "2", "0", "71", "0.5", "25", "sine",
+        # Sintassi sox: flanger delay depth regen width speed SHAPE phase
+        # (shape va in posizione 6: 'sine' o 'triangle', NON un numero)
+        "flanger", "0", "2", "0", "71", "0.5", "sine", "25",
         # Eco corta e ribattuta: voce in scatola metallica.
         "echo", "0.9", "0.85", "25", "0.5",
     ],
