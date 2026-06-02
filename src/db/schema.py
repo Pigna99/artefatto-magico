@@ -7,7 +7,7 @@ Schema v2: aggiunte colonne per il sync col sito campagna.pignalabs.it.
 - origin: 'pi' o 'site' — tracciamento dove la voce è nata.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -74,6 +74,16 @@ CREATE TRIGGER IF NOT EXISTS lore_au AFTER UPDATE ON lore BEGIN
     INSERT INTO lore_fts(rowid, name, description, tags)
     VALUES (new.id, new.name, new.description, COALESCE(new.tags,''));
 END;
+
+-- Tag normalizzati (schema v3). Mirror della tabella postgres lore_tags
+-- sul sito. Popolato via sync.py quando arriva un'entry con campo
+-- `tags: list[str]`. Usato da search_lore per tag-boost.
+CREATE TABLE IF NOT EXISTS lore_tags (
+    lore_id  INTEGER NOT NULL REFERENCES lore(id) ON DELETE CASCADE,
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (lore_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_lore_tags_tag ON lore_tags(tag);
 
 CREATE TABLE IF NOT EXISTS codex (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

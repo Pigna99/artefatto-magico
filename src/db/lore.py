@@ -65,7 +65,8 @@ class LoreMixin:
         """Applica un cambio di lore proveniente dal sito.
 
         payload obbligatorio: name, kind, updated_at.
-        Opzionali: description, tags, secret, sealed, remote_id, deleted_at.
+        Opzionali: description, tags (list[str] o stringa CSV legacy),
+        secret, sealed, visibility, remote_id, deleted_at.
 
         Ritorna 'inserted' | 'updated' | 'deleted' | 'skipped'.
         """
@@ -93,7 +94,16 @@ class LoreMixin:
             if row and row["updated_at"] and remote_ts < row["updated_at"]:
                 return "skipped"
             description = payload.get("description", "")
-            tags = payload.get("tags")
+            # tags puo' arrivare come list[str] (nuovo formato) o stringa CSV
+            # (legacy). Normalizzo a CSV per la colonna `tags` (usata da FTS5)
+            # e a list per la tabella lore_tags.
+            raw_tags = payload.get("tags")
+            tag_list: list[str] = []
+            if isinstance(raw_tags, list):
+                tag_list = [str(t).strip().lower() for t in raw_tags if str(t).strip()]
+            elif isinstance(raw_tags, str) and raw_tags.strip():
+                tag_list = [t.strip().lower() for t in raw_tags.split(",") if t.strip()]
+            tags_csv = ", ".join(tag_list) if tag_list else None
             secret = 1 if payload.get("secret") else 0
             sealed = 1 if payload.get("sealed") else 0
             remote_id = payload.get("remote_id")
@@ -106,9 +116,21 @@ class LoreMixin:
                 "VALUES (?, ?, ?, ?, "
                 "  COALESCE((SELECT created_at FROM lore WHERE name=? AND kind=?), ?), "
                 "  ?, ?, ?, NULL, ?, ?)",
-                (name, kind, description, tags,
+                (name, kind, description, tags_csv,
                  name, kind, now, remote_ts, secret, sealed, origin, remote_id),
             )
+            # Replace tag list in lore_tags
+            lore_row = self._conn.execute(
+                "SELECT id FROM lore WHERE name=? AND kind=?", (name, kind),
+            ).fetchone()
+            if lore_row is not None:
+                lore_id = lore_row["id"]
+                self._conn.execute("DELETE FROM lore_tags WHERE lore_id=?", (lore_id,))
+                for tag in set(tag_list):
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO lore_tags(lore_id, tag) VALUES (?, ?)",
+                        (lore_id, tag),
+                    )
             self._conn.commit()
             return "updated" if row else "inserted"
         finally:
@@ -122,15 +144,47 @@ class LoreMixin:
         return [_row_to_lore(r) for r in cur.fetchall()]
 
     def search_lore(self, query: str, limit: int = 5) -> list[Lore]:
-        """FTS5 con fallback LIKE + boost name-match.
+        """Tag-boost + name-boost + FTS5 + fallback LIKE.
 
-        Il rank di FTS5 (bm25) può relegare un nome di lore esatto sotto
-        risultati con token più rari ma meno pertinenti. Compensiamo cercando
-        prima i lore il cui NOME contiene una delle parole della query.
+        Priorità:
+          1. Voci taggate con un tag presente nella query (peso massimo).
+          2. Voci il cui NOME contiene una parola della query.
+          3. FTS5 bm25 sul resto.
         """
         words = fts_words(query)
         if not words:
             return []
+        wl = [w.lower() for w in words]
+
+        # Pass 0: tag-boost — match esatto fra parola della query (normalizzata)
+        # e tag in lore_tags. Slug normalizzato lato Pi: lowercase, [a-z0-9_-].
+        tag_candidates = {
+            "".join(c for c in w.lower() if c.isalnum() or c in "-_")
+            for w in words
+        }
+        tag_candidates.discard("")
+        tag_ids: list[int] = []
+        if tag_candidates:
+            try:
+                placeholders = ",".join("?" * len(tag_candidates))
+                cur = self._conn.execute(
+                    f"SELECT DISTINCT lore_id FROM lore_tags "
+                    f"WHERE tag IN ({placeholders})",
+                    list(tag_candidates),
+                )
+                tag_ids = [r["lore_id"] for r in cur.fetchall()]
+            except sqlite3.OperationalError:
+                # Tabella lore_tags non ancora migrata: ignora.
+                pass
+        tag_boost: list[Lore] = []
+        if tag_ids:
+            placeholders = ",".join("?" * len(tag_ids))
+            cur = self._conn.execute(
+                f"SELECT id, name, kind, description, tags, sealed "
+                f"FROM lore WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+                tag_ids,
+            )
+            tag_boost = [_row_to_lore(r) for r in cur.fetchall()]
 
         # Pass 1: boost — lore con nome che contiene una parola della query.
         # RANK fra i boost: il nome che matcha PIÙ parole vince (es. "Pianeta
@@ -146,13 +200,12 @@ class LoreMixin:
         raw_boost = [_row_to_lore(r) for r in cur.fetchall()]
         # Ordino per numero di parole della query trovate nel nome (desc),
         # poi a parità nome più corto (più specifico) vince.
-        wl = [w.lower() for w in words]
         def _name_score(lore_obj):
             n = lore_obj.name.lower()
             hits = sum(1 for w in wl if w in n)
             return (-hits, len(lore_obj.name))
         boost = sorted(raw_boost, key=_name_score)
-        boost_ids = {b.id for b in boost}
+        seen_ids = {b.id for b in tag_boost} | {b.id for b in boost}
 
         # Pass 2: FTS5 ordinato per rank
         fts_q = " OR ".join(words)
@@ -165,13 +218,25 @@ class LoreMixin:
                 "ORDER BY rank LIMIT ?",
                 (fts_q, limit * 2),
             )
-            rest = [_row_to_lore(r) for r in cur.fetchall() if r["id"] not in boost_ids]
+            rest = [_row_to_lore(r) for r in cur.fetchall() if r["id"] not in seen_ids]
         except sqlite3.OperationalError:
             pass
 
-        # Merge: prima i name-match, poi FTS, deduplicato, tagliato a limit
-        merged = boost + rest
+        # Merge ordine: tag-boost > name-boost > FTS, deduplicato.
+        boost_filtered = [b for b in boost if b.id not in {t.id for t in tag_boost}]
+        merged = tag_boost + boost_filtered + rest
         if merged:
+            try:
+                from config import log_event
+                log_event(
+                    "rag.lore_search",
+                    q=query[:60],
+                    tag_hits=len(tag_boost),
+                    name_hits=len(boost_filtered),
+                    fts_hits=len(rest),
+                )
+            except Exception:
+                pass
             return merged[:limit]
 
         # Fallback LIKE su description (caso FTS spento)

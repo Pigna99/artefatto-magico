@@ -82,22 +82,19 @@ def _cmd_roll(app, rest: str) -> bool:
 
 
 def _cmd_lore(app, rest: str) -> bool:
-    """/lore add|list|rm. kind ∈ {npc,pg,place,item,event,note}"""
+    """/lore list|search. Read-only: il Pi non scrive piu' lore (le voci
+    vengono create dal GM sul sito campagna.pignalabs.it/lore/new).
+    kind ∈ {npc,pg,place,item,event,note}"""
     if not rest:
-        app.chat.add_sys("uso: /lore add|list|rm ...")
+        app.chat.add_sys(
+            "uso: /lore list [kind] · /lore search <query>. "
+            "Per aggiungere voci: campagna.pignalabs.it/lore/new (solo GM)."
+        )
         return True
     sub, _, args = rest.partition(" ")
     sub = sub.lower()
 
-    if sub == "add":
-        tokens = args.split(maxsplit=2)
-        if len(tokens) < 3:
-            app.chat.add_sys("uso: /lore add <kind> <name> <description>")
-            return True
-        kind, name, desc = tokens
-        app.db.add_lore(name=name, kind=kind, description=desc)
-        app.chat.add_sys(f"lore salvato: {kind} {name}")
-    elif sub == "list":
+    if sub == "list":
         entries = app.db.all_lore()
         if args.strip():
             entries = [e for e in entries if e.kind == args.strip()]
@@ -108,17 +105,24 @@ def _cmd_lore(app, rest: str) -> bool:
                 app.chat.add_sys(e.to_context_line())
             if len(entries) > 30:
                 app.chat.add_sys(f"...e altri {len(entries)-30}")
-    elif sub == "rm":
-        tokens = args.split(maxsplit=1)
-        if not tokens:
-            app.chat.add_sys("uso: /lore rm <name> [kind]")
+    elif sub == "search":
+        q = args.strip()
+        if not q:
+            app.chat.add_sys("uso: /lore search <query>")
             return True
-        name = tokens[0]
-        kind = tokens[1] if len(tokens) > 1 else None
-        n = app.db.remove_lore(name, kind)
-        app.chat.add_sys(f"rimosso {n} elementi")
+        entries = app.db.search_lore(q, limit=10)
+        if not entries:
+            app.chat.add_sys(f"nessun match per '{q}'")
+        else:
+            for e in entries:
+                app.chat.add_sys(e.to_context_line())
+    elif sub in ("add", "rm", "edit", "delete"):
+        app.chat.add_sys(
+            f"/lore {sub} disabilitato: il Pi e' read-only. "
+            "Usa campagna.pignalabs.it/lore (solo GM puo' modificare)."
+        )
     else:
-        app.chat.add_sys(f"sotto-comando ignoto: /lore {sub}")
+        app.chat.add_sys(f"sotto-comando ignoto: /lore {sub} (prova list|search)")
     return True
 
 
