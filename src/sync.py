@@ -51,6 +51,7 @@ class SyncClient:
         self._thread: Optional[threading.Thread] = None
         self._ws = None
         self._ws_thread: Optional[threading.Thread] = None
+        self._cmd_handler = None
         QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -83,22 +84,35 @@ class SyncClient:
                     pending = sum(1 for line in f if line.strip())
         except Exception:
             pass
-        connected = (
-            self._ws is not None and getattr(self._ws, "sock", None) is not None
-        )
-        base = "ws✓" if connected else "http"
+        base = "ws✓" if self._is_ws_connected() else "http"
         if pending:
             return f"sync: {base} (q={pending})"
         return f"sync: {base}"
 
+    def _is_ws_connected(self) -> bool:
+        if self._ws is None:
+            return False
+        # python-socketio Client: attribute `connected`
+        return bool(getattr(self._ws, "connected", False))
+
     def push(self, table: str, op: str, payload: dict):
-        """Callback per `db.on_write`. Emette via WS se connesso, altrimenti
-        accoda. Non solleva mai: una write locale deve sempre andare a
-        buon fine anche se il sync è giù."""
+        """Callback per `db.on_write`. Tenta nell'ordine: WS, HTTP immediato,
+        coda offline. Non solleva mai: una write locale deve sempre andare
+        a buon fine anche se il sync è giù."""
         msg = {"table": table, "op": op, "payload": payload, "ts": time.time()}
         if self._ws_send(msg):
             return
+        if self._http_push(msg):
+            return
         self._enqueue(msg)
+
+    def set_command_handler(self, handler):
+        """Imposta una callback `handler(event, payload)` che viene chiamata
+        quando il server emette un comando master via Socket.io.
+        Eventi noti: 'beep', 'light', 'speak', 'stop_tts'.
+        Eseguita nel thread del client socketio (non bloccare).
+        """
+        self._cmd_handler = handler
 
     # ------------------------------------------------------------------
     # Main loop
@@ -196,70 +210,92 @@ class SyncClient:
                   remaining=len(leftover))
 
     # ------------------------------------------------------------------
-    # WebSocket (opzionale, richiede websocket-client)
+    # Socket.io client (richiede python-socketio[client])
     # ------------------------------------------------------------------
     def _maybe_connect_ws(self):
-        # Il sito usa Socket.io, non WebSocket puro: servirebbe python-socketio
-        # come client. Per ora ci limitiamo al polling HTTP (sufficiente per
-        # uso single-user). Se python-socketio è installato, in futuro
-        # potremmo collegare il client qui.
+        if self._is_ws_connected():
+            return
         try:
-            import socketio  # type: ignore  # noqa: F401
+            import socketio  # type: ignore
         except Exception:
             return
-        # TODO: implementare client socketio quando serve push real-time
-        return
-        # Codice legacy non eseguito ma tenuto come riferimento:
-        try:
-            import websocket  # type: ignore
-        except Exception:
-            return
-        ws_url = self.base.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = f"{ws_url}/ws/sync"
 
-        def on_open(ws):
+        # Auth via querystring/auth: il middleware lato server controlla
+        # `socket.handshake.auth.token` o l'header `X-Pi-Key`.
+        sio = socketio.Client(
+            reconnection=True,
+            reconnection_attempts=0,  # 0 = infinite
+            reconnection_delay=2,
+            reconnection_delay_max=30,
+        )
+
+        @sio.event
+        def connect():
             log_event("sync.ws.open")
-            self._flush_queue()
-
-        def on_message(ws, raw):
             try:
-                msg = json.loads(raw)
-            except Exception:
-                return
-            table = msg.get("table")
-            row = msg.get("payload") or {}
-            if table in ("lore", "codex"):
-                self._apply_remote(table, row)
+                self._flush_queue()
+            except Exception as e:
+                log_event("sync.ws.flush_err", err=repr(e))
 
-        def on_close(ws, *_):
+        @sio.event
+        def disconnect():
             log_event("sync.ws.close")
-            self._ws = None
 
-        def on_error(ws, err):
-            log_event("sync.ws.error", err=repr(err))
+        @sio.on("change")
+        def on_change(data):
+            # Cambi su lore/codex pushati dal server (es. GM edita sul sito)
+            if not isinstance(data, dict):
+                return
+            table = data.get("table")
+            row = data.get("payload") or {}
+            if table in ("lore", "codex"):
+                try:
+                    self._apply_remote(table, row)
+                except Exception as e:
+                    log_event("sync.ws.apply_err", err=repr(e))
 
-        try:
-            self._ws = websocket.WebSocketApp(
-                ws_url,
-                header=[f"X-Pi-Key: {self.key}"],
-                on_open=on_open, on_message=on_message,
-                on_close=on_close, on_error=on_error,
-            )
-            self._ws_thread = threading.Thread(
-                target=self._ws.run_forever,
-                kwargs={"ping_interval": 25, "ping_timeout": 10},
-                name="sync-ws", daemon=True,
-            )
-            self._ws_thread.start()
-        except Exception as e:
-            log_event("sync.ws.start_fail", err=repr(e))
-            self._ws = None
+        @sio.on("master.command")
+        def on_master_command(data):
+            # Comando real-time dal Master (sito → Pi)
+            if not isinstance(data, dict):
+                return
+            event = str(data.get("event", "")).strip()
+            payload = data.get("payload") or {}
+            log_event("sync.master.cmd", event=event)
+            if self._cmd_handler is None:
+                return
+            try:
+                self._cmd_handler(event, payload)
+            except Exception as e:
+                log_event("sync.master.cmd_err", err=repr(e))
+
+        def _run():
+            try:
+                sio.connect(
+                    self.base,
+                    socketio_path="/ws/sync/",
+                    auth={"token": self.key},
+                    headers={"X-Pi-Key": self.key},
+                    transports=["websocket"],
+                    wait=True,
+                    wait_timeout=10,
+                )
+                sio.wait()
+            except Exception as e:
+                log_event("sync.ws.start_fail", err=repr(e))
+
+        self._ws = sio
+        self._ws_thread = threading.Thread(
+            target=_run, name="sync-ws", daemon=True,
+        )
+        self._ws_thread.start()
 
     def _ws_send(self, msg: dict) -> bool:
-        if self._ws is None or not getattr(self._ws, "sock", None):
+        if not self._is_ws_connected():
             return False
         try:
-            self._ws.send(json.dumps(msg, ensure_ascii=False))
+            # Evento "push": il server inoltra il payload alla pipeline upsert.
+            self._ws.emit("push", msg)
             return True
         except Exception:
             return False

@@ -189,9 +189,49 @@ class ArtefattoApp(App):
         try:
             from sync import attach as _sync_attach
             self.sync = _sync_attach(self.db) if self.db else None
+            if self.sync is not None:
+                self.sync.set_command_handler(self._on_master_command)
         except Exception as e:
             log_event("sync.attach_fail", err=repr(e))
             self.sync = None
+
+    def _on_master_command(self, event: str, payload: dict):
+        """Comando real-time dal sito Master Console. Gira nel thread del
+        client Socket.io: non bloccare. Per azioni async (speak) uso
+        call_from_thread per rientrare nell'event loop Textual.
+        """
+        try:
+            if event == "beep" and self.fx:
+                self.fx.beep(str(payload.get("type", "short")))
+            elif event == "light" and self.fx:
+                color = str(payload.get("color", "bianco"))
+                mode = str(payload.get("mode", "pulse"))
+                duration = float(payload.get("duration", 0.6))
+                if mode == "flash":
+                    self.fx.flash(color, duration)
+                elif mode == "off":
+                    self.fx.idle("bianco")
+                else:
+                    # 'on' o 'pulse'
+                    self.fx.flash(color, duration)
+            elif event == "mood" and self.fx:
+                atmosfera = str(payload.get("atmosfera", "")).strip()
+                if atmosfera:
+                    self.fx.mood(atmosfera)
+            elif event == "speak":
+                text = str(payload.get("text", "")).strip()
+                if text and not self.muted:
+                    # Rientro nell'event loop UI per usare il TTS in background.
+                    self.call_from_thread(self._master_speak, text)
+            elif event == "stop_tts":
+                self.call_from_thread(self.action_stop_tts)
+        except Exception as e:
+            log_event("master.cmd.err", event=event, err=repr(e))
+
+    def _master_speak(self, text: str):
+        """Dispara TTS per il messaggio del Master come fosse una visione."""
+        self.chat.add_sys(f"✶ visione dal Master: {text}")
+        asyncio.create_task(asyncio.to_thread(self._speak_one, text))
 
     async def on_unmount(self):
         log_event("session.end", session_id=self.session_id)
