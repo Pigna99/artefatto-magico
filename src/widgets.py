@@ -120,6 +120,14 @@ class HistoryInput(Input):
         self.cursor_position = len(text)
 
     async def _on_key(self, event):
+        # Shift+Enter → newline inline invece di submit. Utile per il codex
+        # quando si scrivono resoconti lunghi su più paragrafi.
+        if event.key == "shift+enter":
+            pos = self.cursor_position
+            self.value = self.value[:pos] + "\n" + self.value[pos:]
+            self.cursor_position = pos + 1
+            event.stop()
+            return
         if event.key == "up":
             if self.h_index == 0:
                 self._draft = self.value

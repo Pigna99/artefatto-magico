@@ -41,8 +41,9 @@ import ollama
 
 from config import (
     DB_PATH, DEFAULT_MODEL, LOCAL_MODELS, PRESET_LOCAL, PRESET_TURBO,
-    SYSTEM_PROMPT, TURBO_BACKEND, TURBO_MODEL, TURBO_MODELS_ENV, TURBO_URL,
-    WAKE_LINE, EDGE_TTS_ENABLED, EDGE_TTS_VOICE, EDGE_TTS_RATE, log_event,
+    START_TURBO, SYSTEM_PROMPT, TURBO_BACKEND, TURBO_MODEL, TURBO_MODELS_ENV,
+    TURBO_URL, WAKE_LINE, EDGE_TTS_ENABLED, EDGE_TTS_VOICE, EDGE_TTS_RATE,
+    log_event,
 )
 from widgets import ChatLog, HistoryInput, StatusPanel
 from tts import (
@@ -91,6 +92,7 @@ class ArtefattoApp(App):
         ("f1", "next_model", "Cambia modello"),
         ("f2", "toggle_turbo", "Locale ↔ Turbo"),
         Binding("tab", "next_input_mode", "Modalità input", priority=True),
+        Binding("ctrl+e", "external_editor", "Editor esterno", priority=True),
         ("ctrl+l", "clear_chat", "Pulisci chat"),
         ("f5", "toggle_mute", "Mute TTS"),
         Binding("f8", "stop_tts", "Stop voce", priority=True),
@@ -132,6 +134,7 @@ class ArtefattoApp(App):
         yield Static(
             "[b]F1[/b] modello  [b]F2[/b] turbo  [b]TAB[/b] modalità  "
             "[b]F5[/b] mute  [b]F8[/b]/[b]ESC[/b] stop  [b]Ctrl+L[/b] clear  "
+            "[b]Ctrl+E[/b] editor  [b]Shift+Enter[/b] newline  "
             "[b]Ctrl+C[/b] esci  [b]/help[/b] comandi",
             id="keys",
         )
@@ -155,6 +158,10 @@ class ArtefattoApp(App):
             self.fx.boot()
             self.fx.turbo(self.use_turbo)
         await asyncio.to_thread(self._init_engines)
+        # Auto-switch a turbo all'avvio (configurabile via ARTEFATTO_START_TURBO).
+        # Non logghiamo session.start finché non abbiamo il modello definitivo.
+        if START_TURBO and TURBO_URL and not self.use_turbo:
+            self.action_toggle_turbo()
         if self.db:
             self.session_id = self.db.start_session(
                 model=self.current_model, turbo=self.use_turbo,
@@ -176,9 +183,22 @@ class ArtefattoApp(App):
         self.client = ollama.Client()
         self.pool = PiperPool()
         self.pool.get(self.preset)
+        # Sync col sito campagna.pignalabs.it (opzionale). Se SYNC_URL è
+        # vuoto la funzione ritorna None e la TUI resta offline come prima.
+        try:
+            from sync import attach as _sync_attach
+            self.sync = _sync_attach(self.db) if self.db else None
+        except Exception as e:
+            log_event("sync.attach_fail", err=repr(e))
+            self.sync = None
 
     async def on_unmount(self):
         log_event("session.end", session_id=self.session_id)
+        if getattr(self, "sync", None):
+            try:
+                self.sync.stop()
+            except Exception:
+                pass
         if self.fx:
             self.fx.shutdown()
             await asyncio.sleep(1.2)
@@ -249,6 +269,36 @@ class ArtefattoApp(App):
         if self.fx:
             self.fx.beep("chirp")
             _, _, _, _ = INPUT_MODES[self.input_mode_idx]
+
+    async def action_external_editor(self):
+        """Apre $EDITOR (default nano) con il contenuto attuale dell'input.
+        Alla chiusura, il contenuto del file viene messo nell'input come
+        se fosse stato digitato — la modalità corrente (CODEX, LORE, ...)
+        applica poi il suo prefisso normalmente al submit.
+        """
+        if self.busy:
+            return
+        import os, tempfile, subprocess
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(self.input.value)
+            tmp_path = f.name
+        try:
+            with self.suspend():
+                subprocess.run([editor, tmp_path], check=False)
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                content = f.read().rstrip("\n")
+            self.input.value = content
+            self.input.cursor_position = len(content)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if self.fx:
+            self.fx.beep("ack")
 
     def watch_input_mode_idx(self, idx: int):
         if not hasattr(self, "input"):

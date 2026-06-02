@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Optional
 
-from config import log_event
+from config import MASTER_NAME, log_event
 
 
 class StickyContext:
@@ -96,7 +96,7 @@ def build_messages_with_rag(history: list[dict], user_text: str, db,
         lines = [m.to_context_line() for m in codex_matches[:5]]
         ctx_codex = (
             "\n\nMEMORIA NARRATIVA (eventi realmente accaduti nelle "
-            "sessioni passate; sono la VERITÀ vissuta da Pigna e prevalgono "
+            f"sessioni passate; sono la VERITÀ vissuta da {MASTER_NAME} e prevalgono "
             "sul lore generale quando la domanda è 'cosa è successo', "
             "'ultimo', 'recente', 'dove siamo stati'):\n" + "\n".join(lines)
         )

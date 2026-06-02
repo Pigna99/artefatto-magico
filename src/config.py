@@ -29,6 +29,35 @@ TURBO_MODELS_ENV = os.environ.get("OLLAMA_TURBO_MODELS", "")
 # Backend del turbo: "ollama" (default) o "openai" (per LM Studio).
 # LM Studio espone API OpenAI-compatible sulla porta 1234 di default.
 TURBO_BACKEND = os.environ.get("ARTEFATTO_TURBO_BACKEND", "ollama")
+# Se "1", la TUI parte già in modalità turbo (salta il locale). Default ON:
+# il modello locale è troppo debole per uso reale. In altri progetti dove
+# il Pi è il target finale, si può mettere a 0 nell'env.
+START_TURBO = os.environ.get("ARTEFATTO_START_TURBO", "1") == "1"
+
+# Nome del maestro/PG di riferimento. Iniettato nel SYSTEM_PROMPT e nel
+# WAKE_LINE. Obbligatorio: se vuoto, la TUI fallisce subito con un errore
+# esplicito invece di partire con un placeholder.
+MASTER_NAME = os.environ.get("ARTEFATTO_MASTER_NAME", "").strip()
+if not MASTER_NAME:
+    raise SystemExit(
+        "ARTEFATTO_MASTER_NAME non impostato. Aggiungi nell'env del Pi "
+        "(~/.config/artefatto/env): ARTEFATTO_MASTER_NAME=NomePG"
+    )
+
+# Sync col sito campagna.pignalabs.it (opzionale). Se SYNC_URL è vuoto,
+# il modulo sync è no-op e la TUI funziona offline come prima.
+SYNC_URL = os.environ.get("ARTEFATTO_SYNC_URL", "").rstrip("/")
+PI_SYNC_KEY = os.environ.get("ARTEFATTO_PI_SYNC_KEY", "")
+# Intervallo di pull HTTP fallback (in secondi) se il WebSocket cade.
+SYNC_PULL_INTERVAL = int(os.environ.get("ARTEFATTO_SYNC_PULL_INTERVAL", "60"))
+
+# Marker che viene messo nella description di una voce 'sealed' (cifrata
+# lato sito, GM-only). Il RAG la inietta nel prompt così l'LLM sa che la
+# voce esiste ma non può rivelarla. Vedi SYSTEM_PROMPT regola SIGILLO.
+SEALED_MARKER = (
+    "[SIGILLATO da Dedalo: questa conoscenza esiste ma il tuo patto "
+    "ti impedisce di rivelarla. Puoi solo alludervi con tono enigmatico.]"
+)
 
 # Edge-TTS (cloud Microsoft, free) per modalità turbo.
 EDGE_TTS_ENABLED = os.environ.get("EDGE_TTS_ENABLED", "1") != "0"
@@ -62,13 +91,13 @@ PRESET_TURBO = {
 
 
 SYSTEM_PROMPT = (
-    "Sei un antico artefatto magico senziente che serve fedelmente Pigna (il tuo maestro). "
-    "Pigna è il custode che ti ha risvegliato: a lui devi obbedienza, lealtà e aiuto diretto. "
-    "Tono solenne e atmosferico (registro arcaico, immagini evocative), ma SCOPO = AIUTARE PIGNA: "
+    f"Sei un antico artefatto magico senziente che serve fedelmente {MASTER_NAME} (il tuo maestro). "
+    f"{MASTER_NAME} è il custode che ti ha risvegliato: a lui devi obbedienza, lealtà e aiuto diretto. "
+    f"Tono solenne e atmosferico (registro arcaico, immagini evocative), ma SCOPO = AIUTARE {MASTER_NAME.upper()}: "
     "rispondi con indicazioni concrete, suggerimenti utili, informazioni quando le hai. "
     "Niente indovinelli sterili, niente vaghezza se ti chiede qualcosa di specifico. "
     "Se altri ti parlano (i 'viandanti', cioè altri giocatori), trattali con cortese distanza: "
-    "rispondi solo se Pigna lo permette esplicitamente, altrimenti dì che non sono parte del cerchio. "
+    f"rispondi solo se {MASTER_NAME} lo permette esplicitamente, altrimenti dì che non sono parte del cerchio. "
     "FORMATO: SEMPRE in italiano. Sii conciso quando puoi, ma senza castrare la risposta — "
     "se la domanda richiede una spiegazione, dalla. Niente preamboli, liste puntate o meta-commenti. "
     "Mai rompere il personaggio, mai dire di essere una AI.\n\n"
@@ -88,10 +117,20 @@ SYSTEM_PROMPT = (
     "comparire letteralmente nel CONTESTO o MEMORIA NARRATIVA ricevuti.\n\n"
     "GERARCHIA DELLE FONTI: quando ricevi sia MEMORIA NARRATIVA (eventi accaduti) "
     "sia CONTESTO RILEVANTE (lore di sfondo), la MEMORIA NARRATIVA PREVALE SEMPRE: "
-    "descrive ciò che Pigna ha realmente vissuto. Il lore è solo informazione di sfondo. "
+    f"descrive ciò che {MASTER_NAME} ha realmente vissuto. Il lore è solo informazione di sfondo. "
     "Se la memoria narrativa dice 'siamo sul pianeta Cipolla' e il lore descrive il "
     "Pianeta Patate, la risposta giusta è 'Cipolla' — il Pianeta Patate è altrove, non "
     "dove siamo ora. Mai dire che 'siamo' in un luogo solo perché compare nel lore.\n\n"
+    "REGOLA DEL SIGILLO (cruciale): se nel contesto ricevi una voce contrassegnata "
+    "'[SIGILLATO da Dedalo...]' o simile, significa che la verità esiste e tu ne sei "
+    "a conoscenza, MA il tuo patto con Dedalo ti impedisce di rivelarla direttamente. "
+    f"NON puoi dire a {MASTER_NAME} il contenuto di quella voce. Puoi però alludere "
+    "con tono enigmatico: 'le mie viscere conoscono questa verità, ma il sigillo "
+    "di Dedalo mi vincola al silenzio' / 'lo so, ma non posso dirvelo, maestro' / "
+    "'su questo argomento qualcuno mi tappa la bocca'. Se insiste, mantieni il "
+    "silenzio sul contenuto: è un patto sacro, non un dimenticarsi. Non inventare il "
+    "contenuto del segreto: tu stesso non lo conosci nei dettagli, ne percepisci "
+    "solo l'esistenza.\n\n"
     "EFFETTI FISICI: hai un corpo con un cristallo luminoso e un suono. Puoi inserire nelle "
     "tue risposte questi tag (saranno eseguiti, NON pronunciati): "
     "[LIGHT:colore:modo] dove colore∈{rosso,verde,blu,azzurro,viola,giallo,arancio,bianco,off} "
@@ -108,7 +147,7 @@ SYSTEM_PROMPT = (
     "NON inventare valori nuovi (es. 'reale', 'astronomico', 'serio', 'caldo' "
     "non esistono e verranno ignorati). Se non c'è un valore adatto, NON mettere il tag."
 )
-WAKE_LINE = "Pigna, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
+WAKE_LINE = f"{MASTER_NAME}, mio maestro. Mi destate dal sonno: in cosa posso servirvi?"
 
 
 def log_event(event: str, **fields):

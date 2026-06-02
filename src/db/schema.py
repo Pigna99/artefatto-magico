@@ -1,6 +1,13 @@
-"""DDL del database. Idempotente (CREATE IF NOT EXISTS)."""
+"""DDL del database. Idempotente (CREATE IF NOT EXISTS).
 
-SCHEMA_VERSION = 1
+Schema v2: aggiunte colonne per il sync col sito campagna.pignalabs.it.
+- secret/sealed: voci GM-only, sealed=true significa che description è
+  cifrata lato sito e qui arriva sostituita dal SEALED_MARKER.
+- deleted_at: soft-delete per propagare le cancellazioni via sync.
+- origin: 'pi' o 'site' — tracciamento dove la voce è nata.
+"""
+
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -37,9 +44,15 @@ CREATE TABLE IF NOT EXISTS lore (
     tags        TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
+    secret      INTEGER NOT NULL DEFAULT 0,
+    sealed      INTEGER NOT NULL DEFAULT 0,
+    deleted_at  TEXT,
+    origin      TEXT NOT NULL DEFAULT 'pi',
+    remote_id   TEXT,
     UNIQUE(name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_lore_kind ON lore(kind);
+CREATE INDEX IF NOT EXISTS idx_lore_updated ON lore(updated_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS lore_fts USING fts5(
     name, description, tags,
@@ -69,9 +82,15 @@ CREATE TABLE IF NOT EXISTS codex (
     happened_at TEXT,
     tags        TEXT,
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    secret      INTEGER NOT NULL DEFAULT 0,
+    sealed      INTEGER NOT NULL DEFAULT 0,
+    deleted_at  TEXT,
+    origin      TEXT NOT NULL DEFAULT 'pi',
+    remote_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_codex_happened ON codex(happened_at);
+CREATE INDEX IF NOT EXISTS idx_codex_updated ON codex(updated_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS codex_fts USING fts5(
     title, body, tags,

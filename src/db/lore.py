@@ -4,8 +4,24 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
+from config import SEALED_MARKER
+
 from .models import Lore
 from ._fts import fts_words
+
+
+def _row_to_lore(row) -> Lore:
+    """Costruisce un Lore da una riga; sostituisce description col marker
+    di sigillo se `sealed=1` (la description reale è cifrata lato sito e
+    non è qui — l'LLM deve sapere che esiste ma non rivelarla)."""
+    d = dict(row)
+    if d.get("sealed"):
+        d["description"] = SEALED_MARKER
+    return Lore(**{k: d.get(k) for k in (
+        "id", "name", "kind", "description", "tags",
+        "secret", "sealed", "deleted_at", "origin", "remote_id",
+        "created_at", "updated_at",
+    ) if k in d})
 
 
 class LoreMixin:
@@ -21,6 +37,10 @@ class LoreMixin:
             (name, kind, description, tags, name, kind, now, now),
         )
         self._conn.commit()
+        self._emit("lore", "upsert", {
+            "name": name, "kind": kind, "description": description,
+            "tags": tags, "updated_at": now,
+        })
         return cur.lastrowid
 
     def remove_lore(self, name: str, kind: Optional[str] = None) -> int:
@@ -29,13 +49,77 @@ class LoreMixin:
         else:
             cur = self._conn.execute("DELETE FROM lore WHERE name=?", (name,))
         self._conn.commit()
+        if cur.rowcount:
+            self._emit("lore", "delete", {
+                "name": name, "kind": kind, "updated_at": self._now(),
+            })
         return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # Merge da remoto (sync). Chiamato da src/sync.py quando arriva una
+    # push dal sito o un delta dal pull HTTP. Idempotente: applica solo
+    # se il timestamp remoto è più recente del locale.
+    # Sopprime self.on_write per la durata dell'operazione (evita echo).
+    # ------------------------------------------------------------------
+    def merge_lore_from_remote(self, payload: dict) -> str:
+        """Applica un cambio di lore proveniente dal sito.
+
+        payload obbligatorio: name, kind, updated_at.
+        Opzionali: description, tags, secret, sealed, remote_id, deleted_at.
+
+        Ritorna 'inserted' | 'updated' | 'deleted' | 'skipped'.
+        """
+        self._sync_local.suppressed = True
+        try:
+            name = payload["name"]
+            kind = payload["kind"]
+            remote_ts = payload.get("updated_at") or self._now()
+            cur = self._conn.execute(
+                "SELECT id, updated_at FROM lore WHERE name=? AND kind=?",
+                (name, kind),
+            )
+            row = cur.fetchone()
+            # Tombstone (delete dal sito)
+            if payload.get("deleted_at"):
+                if row:
+                    self._conn.execute(
+                        "DELETE FROM lore WHERE id=?", (row["id"],),
+                    )
+                    self._conn.commit()
+                    return "deleted"
+                return "skipped"
+            # Server-wins: applico sempre quando il record non esiste oppure
+            # quando il remote_ts è >= locale.
+            if row and row["updated_at"] and remote_ts < row["updated_at"]:
+                return "skipped"
+            description = payload.get("description", "")
+            tags = payload.get("tags")
+            secret = 1 if payload.get("secret") else 0
+            sealed = 1 if payload.get("sealed") else 0
+            remote_id = payload.get("remote_id")
+            origin = payload.get("origin", "site")
+            now = self._now()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO lore("
+                "  name, kind, description, tags, created_at, updated_at, "
+                "  secret, sealed, deleted_at, origin, remote_id) "
+                "VALUES (?, ?, ?, ?, "
+                "  COALESCE((SELECT created_at FROM lore WHERE name=? AND kind=?), ?), "
+                "  ?, ?, ?, NULL, ?, ?)",
+                (name, kind, description, tags,
+                 name, kind, now, remote_ts, secret, sealed, origin, remote_id),
+            )
+            self._conn.commit()
+            return "updated" if row else "inserted"
+        finally:
+            self._sync_local.suppressed = False
 
     def all_lore(self) -> list[Lore]:
         cur = self._conn.execute(
-            "SELECT id, name, kind, description, tags FROM lore ORDER BY kind, name"
+            "SELECT id, name, kind, description, tags, sealed "
+            "FROM lore WHERE deleted_at IS NULL ORDER BY kind, name"
         )
-        return [Lore(**dict(r)) for r in cur.fetchall()]
+        return [_row_to_lore(r) for r in cur.fetchall()]
 
     def search_lore(self, query: str, limit: int = 5) -> list[Lore]:
         """FTS5 con fallback LIKE + boost name-match.
@@ -55,10 +139,11 @@ class LoreMixin:
         like_name = [f"%{w}%" for w in words]
         clause_name = " OR ".join(["name LIKE ?"] * len(words))
         cur = self._conn.execute(
-            f"SELECT id, name, kind, description, tags FROM lore WHERE {clause_name}",
+            f"SELECT id, name, kind, description, tags, sealed "
+            f"FROM lore WHERE deleted_at IS NULL AND ({clause_name})",
             like_name,
         )
-        raw_boost = [Lore(**dict(r)) for r in cur.fetchall()]
+        raw_boost = [_row_to_lore(r) for r in cur.fetchall()]
         # Ordino per numero di parole della query trovate nel nome (desc),
         # poi a parità nome più corto (più specifico) vince.
         wl = [w.lower() for w in words]
@@ -74,13 +159,13 @@ class LoreMixin:
         rest: list[Lore] = []
         try:
             cur = self._conn.execute(
-                "SELECT l.id, l.name, l.kind, l.description, l.tags "
+                "SELECT l.id, l.name, l.kind, l.description, l.tags, l.sealed "
                 "FROM lore l JOIN lore_fts f ON l.id = f.rowid "
-                "WHERE lore_fts MATCH ? "
+                "WHERE lore_fts MATCH ? AND l.deleted_at IS NULL "
                 "ORDER BY rank LIMIT ?",
                 (fts_q, limit * 2),
             )
-            rest = [Lore(**dict(r)) for r in cur.fetchall() if r["id"] not in boost_ids]
+            rest = [_row_to_lore(r) for r in cur.fetchall() if r["id"] not in boost_ids]
         except sqlite3.OperationalError:
             pass
 
@@ -92,10 +177,11 @@ class LoreMixin:
         # Fallback LIKE su description (caso FTS spento)
         clause_desc = " OR ".join(["description LIKE ?"] * len(words))
         cur = self._conn.execute(
-            f"SELECT id, name, kind, description, tags FROM lore WHERE {clause_desc} LIMIT ?",
+            f"SELECT id, name, kind, description, tags, sealed "
+            f"FROM lore WHERE deleted_at IS NULL AND ({clause_desc}) LIMIT ?",
             like_name + [limit],
         )
-        return [Lore(**dict(r)) for r in cur.fetchall()]
+        return [_row_to_lore(r) for r in cur.fetchall()]
 
     def lore_context_for(self, user_text: str, max_entries: int = 5) -> str:
         matches = self.search_lore(user_text, limit=max_entries)
