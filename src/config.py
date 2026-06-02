@@ -50,6 +50,10 @@ SYNC_URL = os.environ.get("ARTEFATTO_SYNC_URL", "").rstrip("/")
 PI_SYNC_KEY = os.environ.get("ARTEFATTO_PI_SYNC_KEY", "")
 # Intervallo di pull HTTP fallback (in secondi) se il WebSocket cade.
 SYNC_PULL_INTERVAL = int(os.environ.get("ARTEFATTO_SYNC_PULL_INTERVAL", "60"))
+# All'avvio della TUI ("oracolo"), wipa lore/codex locali e ricarica
+# tutto dal sito (source of truth). Disattiva con =0 se vuoi mantenere
+# il cache locale e fare solo merge incrementale.
+SYNC_WIPE_AT_BOOT = os.environ.get("ARTEFATTO_SYNC_WIPE_AT_BOOT", "1") == "1"
 
 # Marker che viene messo nella description di una voce 'sealed' (cifrata
 # lato sito, GM-only). Il RAG la inietta nel prompt così l'LLM sa che la

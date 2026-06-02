@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from config import (
-    DATA_DIR, PI_SYNC_KEY, SYNC_PULL_INTERVAL, SYNC_URL, log_event,
+    DATA_DIR, PI_SYNC_KEY, SYNC_PULL_INTERVAL, SYNC_URL,
+    SYNC_WIPE_AT_BOOT, log_event,
 )
 
 
@@ -119,8 +120,12 @@ class SyncClient:
     # ------------------------------------------------------------------
     def _run(self):
         # Pull iniziale (bootstrap), poi loop di pull periodico + flush queue.
+        # Se configurato, wipa tutto e ricarica da zero (sito = verità).
         try:
-            self._pull_delta()
+            if SYNC_WIPE_AT_BOOT:
+                self.full_resync()
+            else:
+                self._pull_delta()
         except Exception as e:
             log_event("sync.pull.bootstrap_error", err=repr(e))
         # Prova WS
@@ -139,6 +144,30 @@ class SyncClient:
     # ------------------------------------------------------------------
     # HTTP pull (delta)
     # ------------------------------------------------------------------
+    def full_resync(self):
+        """Wipe locale di lore+codex e ricarica integralmente dal sito.
+        Il sito è la fonte di verità: tutto ciò che è solo locale viene
+        perso (escluso quello in coda offline che viene flushato dopo)."""
+        log_event("sync.full_resync.start")
+        # Sospendiamo `on_write` durante il wipe e il refill per non
+        # rispedire al sito le voci appena ricaricate.
+        self.db._sync_local.suppressed = True
+        try:
+            self.db._conn.execute("DELETE FROM lore")
+            self.db._conn.execute("DELETE FROM codex")
+            self.db._conn.commit()
+            log_event("sync.full_resync.wiped")
+            # Reset cursore di pull → richiediamo tutto.
+            self._save_last_pull("")
+            # Pull from-zero (since vuoto → server torna tutte le righe).
+            self._pull_delta()
+            log_event("sync.full_resync.ok")
+        except Exception as e:
+            log_event("sync.full_resync.error", err=repr(e))
+            raise
+        finally:
+            self.db._sync_local.suppressed = False
+
     def _pull_delta(self):
         since = self._load_last_pull()
         for table in ("lore", "codex"):
