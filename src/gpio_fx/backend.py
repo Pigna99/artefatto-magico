@@ -55,6 +55,35 @@ class _RealBackend:
         self.led_g.value = max(0.0, min(1.0, g * LED_GAIN_G))
         self.led_b.value = max(0.0, min(1.0, b * LED_GAIN_B))
 
+    def reinit_buzzer(self):
+        """Ricostruisce il TonalBuzzer dopo che è andato in stato corrotto
+        (es. dopo subprocess.run con suspend Textual)."""
+        try:
+            if self.buzz_tonal is not None:
+                try:
+                    self.buzz_tonal.close()
+                except Exception:
+                    pass
+                self.buzz_tonal = None
+            if self.buzz_active is not None:
+                try:
+                    self.buzz_active.close()
+                except Exception:
+                    pass
+                self.buzz_active = None
+            if BUZZ_TYPE == "passive":
+                from gpiozero import TonalBuzzer  # type: ignore
+                self.buzz_tonal = TonalBuzzer(PIN_BUZZ)
+            else:
+                from gpiozero import Buzzer  # type: ignore
+                self.buzz_active = Buzzer(PIN_BUZZ)
+        except Exception as e:
+            try:
+                from config import log_event
+                log_event("gpio.reinit_buzzer.err", err=repr(e)[:120])
+            except Exception:
+                pass
+
     def play_tone(self, freq_hz: float, duration_s: float):
         if self.buzz_tonal is not None:
             try:

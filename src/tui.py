@@ -125,6 +125,10 @@ class ArtefattoApp(App):
         # Sticky RAG context: tiene i match degli ultimi 2 turni per evitare
         # che il 3° turno perda il filo (multi-turn coherence).
         self.sticky = StickyContext(max_turns=2)
+        # Interrupt + coda comandi Master quando l'editor esterno è aperto.
+        # _editor_interrupt è non-None solo durante _codex_two_step.
+        self._editor_interrupt = None  # threading.Event quando attivo
+        self._pending_master: list = []
 
     # ------------------------------------------------------------------
     # Layout + lifecycle
@@ -207,7 +211,25 @@ class ArtefattoApp(App):
         """Comando real-time dal sito Master Console. Gira nel thread del
         client Socket.io: non bloccare. Per azioni async (speak) uso
         call_from_thread per rientrare nell'event loop Textual.
+
+        Se la TUI è dentro l'editor esterno (codex two-step), segnalo
+        all'editor di terminare salvando, accodo il comando e lo eseguo
+        appena tornata in vita.
         """
+        ei = getattr(self, "_editor_interrupt", None)
+        if ei is not None:
+            # Sono dentro nano. Accodo il comando e segnalo l'interrupt.
+            # Nessuna notifica chat qui: call_from_thread blocca durante
+            # suspend, faremmo lockup. La vedrai al rientro dall'editor.
+            self._pending_master.append((event, payload))
+            ei.set()
+            log_event("master.cmd.deferred", evt=event)
+            return
+        # Notifica visuale in chat (thread-safe via call_from_thread).
+        try:
+            self.call_from_thread(self.chat.add_sys, f"⇶ Master: {event}")
+        except Exception:
+            pass
         try:
             if event == "beep" and self.fx:
                 self.fx.beep(str(payload.get("type", "short")))
@@ -544,12 +566,48 @@ class ArtefattoApp(App):
             tmp_path = f.name
         log_event("codex.editor.open", title=title[:60],
                   mode="edit" if is_edit else "new")
+
+        import threading
+        interrupt = threading.Event()
+        self._editor_interrupt = interrupt
+        log_event("codex.editor.armed", flag_set=bool(self._editor_interrupt))
+        interrupted = False
         try:
             with self.suspend():
-                subprocess.run([editor, tmp_path], check=False)
+                proc = subprocess.Popen([editor, tmp_path])
+                log_event("codex.editor.popen", pid=proc.pid)
+                # Watcher: se arriva un comando Master, scriviamo il file
+                # corrente (nano già auto-salva su Ctrl-O, ma se l'utente
+                # non l'ha fatto perdiamo il buffer) e killiamo il processo.
+                while True:
+                    try:
+                        proc.wait(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if interrupt.is_set():
+                            interrupted = True
+                            # Nano salva su SIGTERM? No, salva su Ctrl+S/O.
+                            # SIGTERM lo killa senza salvare il buffer non
+                            # scritto. Accettiamo: l'utente sarà avvisato.
+                            try:
+                                proc.terminate()
+                                proc.wait(timeout=2)
+                            except Exception:
+                                proc.kill()
+                            break
             with open(tmp_path, "r", encoding="utf-8") as f:
                 raw = f.read()
         finally:
+            self._editor_interrupt = None
+            # Dopo subprocess.run + suspend, il TonalBuzzer va in stato
+            # corrotto (.frequency è None). Ricreo il device per ripristinare
+            # la possibilità di beep.
+            if self.fx:
+                try:
+                    self.fx.reinit_buzzer()
+                    log_event("gpio.reinit_buzzer.ok")
+                except Exception as e:
+                    log_event("gpio.reinit_buzzer.fail", err=repr(e))
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -565,9 +623,18 @@ class ArtefattoApp(App):
         # Rimuovo l'header markdown "# titolo" se l'utente non l'ha tolto
         if body.startswith("# "):
             body = "\n".join(body.split("\n", 1)[1:]).strip()
+        if interrupted:
+            self.chat.add_sys(
+                f"editor interrotto da comando Master "
+                f"({'modifiche perse' if not is_edit else 'voce originale intatta'})"
+            )
+            log_event("codex.editor.interrupted", title=title[:60],
+                      mode="edit" if is_edit else "new")
         if not body:
-            self.chat.add_sys(f"codex «{title}» annullato (vuoto)")
-            log_event("codex.cancel", title=title[:60])
+            if not interrupted:
+                self.chat.add_sys(f"codex «{title}» annullato (vuoto)")
+                log_event("codex.cancel", title=title[:60])
+            self._drain_pending_master()
             return
         try:
             if is_edit:
@@ -583,6 +650,20 @@ class ArtefattoApp(App):
         except Exception as e:
             self.chat.add_sys(f"errore salvataggio codex: {e}")
             log_event("codex.error", err=repr(e))
+        self._drain_pending_master()
+
+    def _drain_pending_master(self):
+        """Esegue i comandi Master che sono arrivati durante l'editor."""
+        if not self._pending_master:
+            return
+        pending = list(self._pending_master)
+        self._pending_master.clear()
+        for ev, payload in pending:
+            log_event("master.cmd.replay", evt=ev)
+            try:
+                self._on_master_command(ev, payload)
+            except Exception as e:
+                log_event("master.cmd.replay_err", err=repr(e))
 
     async def _llm_phase(self, user_text: str) -> tuple[list[str], str]:
         if self.fx:

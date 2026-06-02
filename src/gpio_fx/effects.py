@@ -147,6 +147,11 @@ class GpioFx:
         pattern = self.BEEP_PATTERNS.get(kind, self.BEEP_PATTERNS["short"])
         threading.Thread(target=self._play_pattern, args=(pattern,), daemon=True).start()
 
+    def reinit_buzzer(self):
+        """Chiama backend.reinit_buzzer() se disponibile (mock backend ignora)."""
+        if hasattr(self._b, "reinit_buzzer"):
+            self._b.reinit_buzzer()
+
     def _play_pattern(self, pattern):
         for step in pattern:
             if len(step) == 3:

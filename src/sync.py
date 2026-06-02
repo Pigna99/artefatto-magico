@@ -303,11 +303,9 @@ class SyncClient:
             payload = data.get("payload") or {}
             log_event("sync.master.cmd", evt=evt,
                       has_handler=bool(self._cmd_handler))
-            if self._debug_cb:
-                try:
-                    self._debug_cb(f"⇶ Master: {evt}")
-                except Exception as e:
-                    log_event("sync.dbg.cb_err", err=repr(e))
+            # NON chiamare debug_cb qui: usa call_from_thread di Textual
+            # che si blocca quando l'app è in suspend (editor aperto).
+            # La notifica visuale la facciamo lato tui.py se opportuno.
             if self._cmd_handler is None:
                 return
             try:
