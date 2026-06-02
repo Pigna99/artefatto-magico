@@ -298,6 +298,14 @@ class SyncClient:
             except Exception as e:
                 log_event("sync.master.cmd_err", err=repr(e))
 
+        # Fallback per debug: cattura QUALSIASI evento per scoprire se il
+        # nome con il punto non viene riconosciuto.
+        @sio.on("*")
+        def catch_all(event_name, *args):
+            log_event("sync.ws.recv", evt=str(event_name)[:60])
+            if event_name == "master.command" and args:
+                on_master_command(args[0])
+
         def _run():
             try:
                 sio.connect(
