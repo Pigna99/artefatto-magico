@@ -509,23 +509,33 @@ class ArtefattoApp(App):
 
     async def _codex_two_step(self, *, title: str):
         """Flow CODEX a due step: titolo inline → editor esterno per il body
-        → salva nel DB. Non passa dal LLM, non genera risposta vocale."""
+        → salva nel DB. Se la voce esiste già, il body attuale è precaricato
+        nell'editor (modalità EDIT). Non passa dal LLM, non genera voce."""
         if not self.db:
             self.chat.add_sys("DB non disponibile, codex saltato")
             return
         import os, tempfile, subprocess
+
+        # Cerca voce esistente con questo titolo (modalità edit)
+        existing = self.db._conn.execute(
+            "SELECT id, body FROM codex WHERE title = ? AND deleted_at IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (title,),
+        ).fetchone()
+        is_edit = existing is not None
+
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=f"_codex_{title[:30].replace(' ', '_')}.md",
             delete=False, encoding="utf-8",
         ) as f:
-            f.write(
-                f"# {title}\n\n"
-                "<!-- Scrivi qui il resoconto. Salva e chiudi per registrare. "
-                "Lascia il file vuoto per annullare. -->\n\n"
-            )
+            if is_edit:
+                f.write(existing["body"])
+            else:
+                f.write("<!-- scrivi qui -->\n")
             tmp_path = f.name
-        log_event("codex.editor.open", title=title[:60])
+        log_event("codex.editor.open", title=title[:60],
+                  mode="edit" if is_edit else "new")
         try:
             with self.suspend():
                 subprocess.run([editor, tmp_path], check=False)
@@ -552,9 +562,14 @@ class ArtefattoApp(App):
             log_event("codex.cancel", title=title[:60])
             return
         try:
-            self.db.add_codex(title=title, body=body)
-            self.chat.add_sys(f"Codex: {title}")
-            log_event("codex.saved", title=title[:60], chars=len(body))
+            if is_edit:
+                self.db.update_codex_body(existing["id"], body)
+                self.chat.add_sys(f"Codex aggiornato: {title}")
+                log_event("codex.updated", title=title[:60], chars=len(body))
+            else:
+                self.db.add_codex(title=title, body=body)
+                self.chat.add_sys(f"Codex: {title}")
+                log_event("codex.saved", title=title[:60], chars=len(body))
             if self.fx:
                 self.fx.beep("ack")
         except Exception as e:

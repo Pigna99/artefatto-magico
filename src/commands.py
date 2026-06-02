@@ -10,9 +10,10 @@ import re
 
 
 HELP_TEXT = (
-    "comandi: /lore add <kind> <name> <description> · /lore list · /lore rm <name> · "
-    "/codex add <title> <body> · /codex append <title> <body> · /codex list · /codex rm <title> · "
-    "/roll <nDx> (es. /roll d20, /roll 2d6)"
+    "comandi: /codex list · /codex edit <titolo> · /codex rm <titolo> · "
+    "/roll <nDx> (es. /roll d20, /roll 2d6). "
+    "TAB → CODEX: scrivi il titolo (Invio apre l'editor, "
+    "se il titolo esiste già viene caricato per la modifica)."
 )
 
 
@@ -159,6 +160,14 @@ def _cmd_codex(app, rest: str) -> bool:
             return True
         n = app.db.remove_codex(title)
         app.chat.add_sys(f"rimosso {n} elementi")
+    elif sub == "edit":
+        title = args.strip()
+        if not title:
+            app.chat.add_sys("uso: /codex edit <titolo>")
+            return True
+        # Riuso il flow CODEX two-step (apre editor con body precaricato).
+        import asyncio
+        asyncio.create_task(app._codex_two_step(title=title))
     else:
         app.chat.add_sys(f"sotto-comando ignoto: /codex {sub}")
     return True

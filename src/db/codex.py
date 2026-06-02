@@ -62,6 +62,29 @@ class CodexMixin:
         })
         return row["id"]
 
+    def update_codex_body(self, codex_id: int, new_body: str) -> bool:
+        """Sostituisce il body di una voce codex esistente.
+        Aggiorna updated_at e propaga via sync."""
+        cur = self._conn.execute(
+            "SELECT title, happened_at, tags FROM codex WHERE id = ?",
+            (codex_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        now = self._now()
+        self._conn.execute(
+            "UPDATE codex SET body = ?, updated_at = ? WHERE id = ?",
+            (new_body, now, codex_id),
+        )
+        self._conn.commit()
+        self._emit("codex", "upsert", {
+            "title": row["title"], "body": new_body,
+            "happened_at": row["happened_at"], "tags": row["tags"],
+            "updated_at": now,
+        })
+        return True
+
     def remove_codex(self, title: str) -> int:
         cur = self._conn.execute("DELETE FROM codex WHERE title = ?", (title,))
         self._conn.commit()
